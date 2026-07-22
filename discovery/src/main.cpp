@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
@@ -95,7 +96,7 @@ static String bytes_to_ascii(const uint8_t *data, size_t len) {
   return out;
 }
 
-// ===================== BLE target selection (mirrors discovery.ino) =====================
+// ===================== BLE scan bookkeeping =====================
 
 static std::string lower_copy(const std::string &input) {
   std::string out = input;
@@ -103,22 +104,6 @@ static std::string lower_copy(const std::string &input) {
     if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
   }
   return out;
-}
-
-static bool is_service_hint_match(const std::string &uuid_lower) {
-  return uuid_lower.find("0000ffe0") != std::string::npos ||
-         uuid_lower.find("0000ff00") != std::string::npos ||
-         uuid_lower.find("0000fff0") != std::string::npos;
-}
-
-static bool is_name_hint_match(BLEAdvertisedDevice &dev) {
-  if (!dev.haveName()) return false;
-  const std::string name = lower_copy(dev.getName());
-  return name.find("ecoworthy") != std::string::npos ||
-         name.find("eco worthy") != std::string::npos ||
-         name.find("bw0f") != std::string::npos ||
-         name.find("jbd") != std::string::npos ||
-         name.find("bms") != std::string::npos;
 }
 
 static std::vector<BLEAdvertisedDevice *> g_discovered;
@@ -147,46 +132,24 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   }
 };
 
-static BLEAdvertisedDevice *pick_best_target() {
-  if (g_discovered.empty()) return nullptr;
-
-  BLEAdvertisedDevice *best_name_hint = nullptr;
-  BLEAdvertisedDevice *best_service_hint = nullptr;
-  BLEAdvertisedDevice *best_rssi = nullptr;
-
-  for (BLEAdvertisedDevice *dev : g_discovered) {
-    if (best_rssi == nullptr || dev->getRSSI() > best_rssi->getRSSI()) best_rssi = dev;
-
-    if (is_name_hint_match(*dev)) {
-      if (best_name_hint == nullptr || dev->getRSSI() > best_name_hint->getRSSI())
-        best_name_hint = dev;
-    }
-
-    if (dev->haveServiceUUID()) {
-      const std::string uuid = lower_copy(dev->getServiceUUID().toString());
-      if (is_service_hint_match(uuid)) {
-        if (best_service_hint == nullptr || dev->getRSSI() > best_service_hint->getRSSI())
-          best_service_hint = dev;
-      }
-    }
-  }
-
-  if (best_name_hint != nullptr) {
-    log_line("[TARGET] selected via name hint (ecoworthy/bw0f/bms/jbd)");
-    return best_name_hint;
-  }
-  if (best_service_hint != nullptr) {
-    log_line("[TARGET] selected via JBD-like service UUID hint");
-    return best_service_hint;
-  }
-  log_line("[TARGET] no name/service hint match; falling back to strongest RSSI");
-  return best_rssi;
-}
-
 // ===================== BLE connect / subscribe / log =====================
 
 static bool g_ble_connected = false;
 static BLEClient *g_ble_client = nullptr;
+static volatile bool g_force_rescan = false;
+static const uint32_t NOTIFY_WINDOW_MS = 8000;
+
+// Sleeps up to ms, bailing out early if a rescan was requested. Returns true
+// if it bailed early.
+static bool wait_or_rescan(uint32_t ms) {
+  uint32_t waited = 0;
+  while (waited < ms) {
+    if (g_force_rescan) return true;
+    vTaskDelay(pdMS_TO_TICKS(200));
+    waited += 200;
+  }
+  return false;
+}
 
 static void on_ble_notify(BLERemoteCharacteristic *ch, uint8_t *data, size_t length, bool isNotify) {
   String line = "[" + String(isNotify ? "NOTIFY" : "INDICATE") + "] char=" +
@@ -207,97 +170,119 @@ class ClientCallbacks : public BLEClientCallbacks {
   }
 };
 
-static void explore_and_subscribe(BLEAdvertisedDevice *target) {
+// Connects to one device, logs every service/characteristic/read, subscribes
+// to every notify/indicate characteristic, listens for a while, then
+// disconnects so the next device in this scan cycle can be explored.
+static void explore_and_subscribe(BLEAdvertisedDevice *target, size_t idx, size_t total) {
   if (g_ble_client == nullptr) {
     g_ble_client = BLEDevice::createClient();
     g_ble_client->setClientCallbacks(new ClientCallbacks());
   }
 
-  log_line("[BLE] connecting to " + String(target->getAddress().toString().c_str()));
+  String addr = String(target->getAddress().toString().c_str());
+  log_line("[BLE] (" + String(static_cast<int>(idx)) + "/" + String(static_cast<int>(total)) +
+           ") connecting to " + addr);
+
   if (!g_ble_client->connect(target)) {
-    log_line("[BLE] connect failed");
+    log_line("[BLE] connect failed: " + addr);
     return;
   }
   g_ble_connected = true;
 
   std::map<std::string, BLERemoteService *> *services = g_ble_client->getServices();
+  bool has_notify = false;
+
   if (services == nullptr || services->empty()) {
-    log_line("[BLE] no GATT services discovered");
-    return;
-  }
+    log_line("[BLE] no GATT services discovered on " + addr);
+  } else {
+    log_line("[BLE] " + addr + " has " + String(static_cast<int>(services->size())) + " service(s)");
 
-  log_line("[BLE] discovered " + String(static_cast<int>(services->size())) + " service(s)");
+    for (const auto &service_entry : *services) {
+      if (g_force_rescan) break;
+      BLERemoteService *svc = service_entry.second;
+      log_line("[SERVICE] " + addr + " " + String(service_entry.first.c_str()));
 
-  for (const auto &service_entry : *services) {
-    BLERemoteService *svc = service_entry.second;
-    log_line("[SERVICE] " + String(service_entry.first.c_str()));
+      std::map<std::string, BLERemoteCharacteristic *> *chars = svc->getCharacteristics();
+      if (chars == nullptr || chars->empty()) continue;
 
-    std::map<std::string, BLERemoteCharacteristic *> *chars = svc->getCharacteristics();
-    if (chars == nullptr || chars->empty()) continue;
+      for (const auto &char_entry : *chars) {
+        BLERemoteCharacteristic *ch = char_entry.second;
 
-    for (const auto &char_entry : *chars) {
-      BLERemoteCharacteristic *ch = char_entry.second;
+        String flags;
+        if (ch->canRead()) flags += "read,";
+        if (ch->canNotify()) flags += "notify,";
+        if (ch->canIndicate()) flags += "indicate,";
+        if (ch->canWrite()) flags += "write,";
+        if (ch->canWriteNoResponse()) flags += "write_no_response,";
 
-      String flags;
-      if (ch->canRead()) flags += "read,";
-      if (ch->canNotify()) flags += "notify,";
-      if (ch->canIndicate()) flags += "indicate,";
-      if (ch->canWrite()) flags += "write,";
-      if (ch->canWriteNoResponse()) flags += "write_no_response,";
+        log_line("[CHARACTERISTIC] " + addr + " " + String(char_entry.first.c_str()) + " flags=" + flags);
 
-      log_line("[CHARACTERISTIC] " + String(char_entry.first.c_str()) + " flags=" + flags);
+        if (ch->canRead()) {
+          std::string value = ch->readValue();
+          if (!value.empty()) {
+            log_line("[READ] " + addr + " char=" + String(ch->getUUID().toString().c_str()) +
+                      " len=" + String(static_cast<int>(value.size())) +
+                      " hex=" + bytes_to_hex(reinterpret_cast<const uint8_t *>(value.data()), value.size()) +
+                      " ascii=\"" + bytes_to_ascii(reinterpret_cast<const uint8_t *>(value.data()), value.size()) + "\"");
+          }
+        }
 
-      if (ch->canRead()) {
-        std::string value = ch->readValue();
-        if (!value.empty()) {
-          log_line("[READ] char=" + String(ch->getUUID().toString().c_str()) +
-                    " len=" + String(static_cast<int>(value.size())) +
-                    " hex=" + bytes_to_hex(reinterpret_cast<const uint8_t *>(value.data()), value.size()) +
-                    " ascii=\"" + bytes_to_ascii(reinterpret_cast<const uint8_t *>(value.data()), value.size()) + "\"");
+        if (ch->canNotify() || ch->canIndicate()) {
+          ch->registerForNotify(on_ble_notify);
+          log_line("[SUBSCRIBE] " + addr + " char=" + String(ch->getUUID().toString().c_str()));
+          has_notify = true;
         }
       }
+    }
 
-      if (ch->canNotify() || ch->canIndicate()) {
-        ch->registerForNotify(on_ble_notify);
-        log_line("[SUBSCRIBE] char=" + String(ch->getUUID().toString().c_str()));
-      }
+    if (has_notify && !g_force_rescan) {
+      log_line("[BLE] listening to " + addr + " for " + String(static_cast<int>(NOTIFY_WINDOW_MS / 1000)) + "s");
+      wait_or_rescan(NOTIFY_WINDOW_MS);
     }
   }
+
+  if (g_ble_client->isConnected()) {
+    g_ble_client->disconnect();
+  }
+  g_ble_connected = false;
+  vTaskDelay(pdMS_TO_TICKS(300));
 }
 
-// One scan+connect attempt. Runs on its own task so it never blocks WiFi/OTA/HTTP.
+// Continuously scans, then explores every device it finds (not just one
+// best guess) before scanning again. Runs on its own task so it never
+// blocks WiFi/OTA/HTTP even during a long scan or a slow connect attempt.
 static void ble_task(void *param) {
+  static ScanCallbacks scan_callbacks;
+  BLEScan *scanner = BLEDevice::getScan();
+  scanner->setAdvertisedDeviceCallbacks(&scan_callbacks);
+
   for (;;) {
-    if (g_ble_connected && g_ble_client != nullptr && g_ble_client->isConnected()) {
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      continue;
-    }
+    g_force_rescan = false;
 
     for (BLEAdvertisedDevice *d : g_discovered) delete d;
     g_discovered.clear();
     g_seen_macs.clear();
 
     log_line("[SCAN] starting 10s BLE scan...");
-    BLEScan *scanner = BLEDevice::getScan();
-    scanner->setAdvertisedDeviceCallbacks(new ScanCallbacks());
     scanner->setActiveScan(true);
     scanner->setInterval(100);
     scanner->setWindow(99);
     scanner->start(10, false);
     scanner->clearResults();
 
-    log_line("[SCAN] found " + String(static_cast<int>(g_discovered.size())) + " unique device(s)");
+    size_t total = g_discovered.size();
+    log_line("[SCAN] found " + String(static_cast<int>(total)) + " unique device(s); exploring each");
 
-    BLEAdvertisedDevice *target = pick_best_target();
-    if (target != nullptr) {
-      explore_and_subscribe(target);
-    } else {
-      log_line("[BLE] no candidate device found this round");
+    for (size_t i = 0; i < total; i++) {
+      if (g_force_rescan) {
+        log_line("[RESCAN] rescan requested, restarting scan cycle");
+        break;
+      }
+      explore_and_subscribe(g_discovered[i], i + 1, total);
     }
 
-    if (!g_ble_connected) {
-      log_line("[BLE] will retry scan in 15s");
-      vTaskDelay(pdMS_TO_TICKS(15000));
+    if (!g_force_rescan) {
+      log_line("[SCAN] cycle complete, rescanning...");
     }
   }
 }
@@ -353,14 +338,25 @@ static const char PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <title>Hobocamp BW0F Logger</title>
 <style>
 body{background:#0b0f14;color:#c9d1d9;font-family:ui-monospace,Consolas,Menlo,monospace;margin:0}
-#bar{padding:10px 14px;background:#161b22;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0}
+#bar{padding:10px 14px;background:#161b22;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;gap:10px;flex-wrap:wrap}
 #status{color:#8b949e;font-size:13px}
 #log{padding:12px 14px;white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.45}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
 .ok{background:#3fb950}.bad{background:#f85149}
+button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 12px;font-family:inherit;font-size:12.5px;cursor:pointer}
+button:hover{background:#30363d}
+button:disabled{opacity:0.5;cursor:default}
+.controls{display:flex;gap:8px;align-items:center}
 </style></head>
 <body>
-<div id="bar"><div><span class="dot bad" id="dot"></span><b>Hobocamp EcoWorthy BW0F Logger</b></div><div id="status">connecting...</div></div>
+<div id="bar">
+  <div><span class="dot bad" id="dot"></span><b>Hobocamp EcoWorthy BW0F Logger</b></div>
+  <div class="controls">
+    <div id="status">connecting...</div>
+    <button id="rescanBtn" onclick="rescan()">Rescan BLE</button>
+    <button id="rebootBtn" onclick="reboot()">Reboot</button>
+  </div>
+</div>
 <div id="log"></div>
 <script>
 const logEl = document.getElementById('log');
@@ -378,6 +374,18 @@ es.onmessage = (e) => {
   if (lines > 1500) { logEl.removeChild(logEl.firstChild); lines--; }
   window.scrollTo(0, document.body.scrollHeight);
 };
+function rescan() {
+  fetch('/rescan').then(() => {
+    statusEl.textContent = 'rescan requested';
+  });
+}
+function reboot() {
+  if (!confirm('Reboot the device? It will drop off WiFi for a few seconds.')) return;
+  const btn = document.getElementById('rebootBtn');
+  btn.disabled = true;
+  btn.textContent = 'Rebooting...';
+  fetch('/reboot').catch(() => {});
+}
 </script>
 </body></html>
 )HTML";
@@ -414,15 +422,147 @@ static bool add_log_client(WiFiClient client, bool sse) {
   return false;
 }
 
+static String url_query_param(const String &requestLine, const String &key) {
+  int qIdx = requestLine.indexOf('?');
+  if (qIdx < 0) return "";
+  int spaceIdx = requestLine.indexOf(' ', qIdx);
+  String query = requestLine.substring(qIdx + 1, spaceIdx < 0 ? requestLine.length() : spaceIdx);
+  String needle = key + "=";
+  int pos = query.indexOf(needle);
+  if (pos < 0) return "";
+  int start = pos + needle.length();
+  int end = query.indexOf('&', start);
+  return end < 0 ? query.substring(start) : query.substring(start, end);
+}
+
+// Custom HTTP-push OTA: the client (our own upload script) POSTs the raw
+// firmware binary in one direction over a single TCP connection. Avoids
+// ArduinoOTA's UDP invitation + callback-connection handshake, which
+// needs a route back from the device to the uploading machine and turned
+// out to be unreliable over the HaLow bridge. Only reboots on a fully
+// verified write; any failure leaves the currently-running firmware alone.
+static void handle_update_upload(WiFiClient client, const String &requestLine, long contentLength,
+                                  String expectedMd5) {
+  String token = url_query_param(requestLine, "token");
+  if (token != OTA_PASSWORD) {
+    log_line("[UPDATE] rejected: bad/missing token");
+    client.println("HTTP/1.1 401 Unauthorized");
+    client.println("Connection: close");
+    client.println();
+    client.print("bad token\r\n");
+    client.stop();
+    return;
+  }
+
+  if (contentLength <= 0) {
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.print("missing/invalid Content-Length\r\n");
+    client.stop();
+    return;
+  }
+
+  log_line("[UPDATE] starting: " + String(contentLength) + " bytes, expected md5=" +
+           (expectedMd5.length() ? expectedMd5 : String("(none)")));
+
+  if (!Update.begin(contentLength)) {
+    log_line("[UPDATE] begin failed: " + String(Update.errorString()));
+    client.println("HTTP/1.1 500 Internal Server Error");
+    client.println("Connection: close");
+    client.println();
+    client.print("Update.begin failed: " + String(Update.errorString()) + "\r\n");
+    client.stop();
+    return;
+  }
+
+  if (expectedMd5.length() == 32) {
+    Update.setMD5(expectedMd5.c_str());
+  }
+
+  static uint8_t buf[1024];
+  long remaining = contentLength;
+  uint32_t lastProgressPct = 0;
+  client.setTimeout(10);
+  uint32_t stallStart = millis();
+
+  while (remaining > 0) {
+    size_t want = remaining < (long)sizeof(buf) ? (size_t)remaining : sizeof(buf);
+    size_t n = client.readBytes(buf, want);
+    if (n == 0) {
+      if (!client.connected() || millis() - stallStart > 30000) {
+        log_line("[UPDATE] aborted: connection stalled/closed with " + String(remaining) + " bytes remaining");
+        Update.abort();
+        client.stop();
+        return;
+      }
+      continue;
+    }
+    stallStart = millis();
+
+    if (Update.write(buf, n) != n) {
+      log_line("[UPDATE] write error: " + String(Update.errorString()));
+      Update.abort();
+      client.println("HTTP/1.1 500 Internal Server Error");
+      client.println("Connection: close");
+      client.println();
+      client.print("write failed: " + String(Update.errorString()) + "\r\n");
+      client.stop();
+      return;
+    }
+    remaining -= n;
+
+    uint32_t pct = static_cast<uint32_t>(100 * (contentLength - remaining) / contentLength);
+    if (pct >= lastProgressPct + 10) {
+      lastProgressPct = pct - (pct % 10);
+      log_line("[UPDATE] progress " + String(pct) + "%");
+    }
+  }
+
+  if (!Update.end(true)) {
+    log_line("[UPDATE] failed: " + String(Update.errorString()));
+    client.println("HTTP/1.1 500 Internal Server Error");
+    client.println("Connection: close");
+    client.println();
+    client.print("Update.end failed: " + String(Update.errorString()) + "\r\n");
+    client.stop();
+    return;
+  }
+
+  log_line("[UPDATE] success, rebooting");
+  client.println("HTTP/1.1 200 OK");
+  client.println("Connection: close");
+  client.println();
+  client.print("update ok, rebooting\r\n");
+  client.flush();
+  client.stop();
+  delay(300);
+  ESP.restart();
+}
+
 static void handle_http_client(WiFiClient client) {
   client.setTimeout(2);
   String requestLine = client.readStringUntil('\n');
+
+  long contentLength = -1;
+  String firmwareMd5;
+
   while (client.available()) {
     String h = client.readStringUntil('\n');
     if (h == "\r") break;
+    String hLower = h;
+    hLower.toLowerCase();
+    if (hLower.startsWith("content-length:")) {
+      contentLength = h.substring(h.indexOf(':') + 1).toInt();
+    } else if (hLower.startsWith("x-firmware-md5:")) {
+      firmwareMd5 = h.substring(h.indexOf(':') + 1);
+      firmwareMd5.trim();
+    }
   }
 
-  if (requestLine.startsWith("GET / ") || requestLine.startsWith("GET / HTTP")) {
+  if (requestLine.startsWith("POST /update")) {
+    handle_update_upload(client, requestLine, contentLength, firmwareMd5);
+  } else if (requestLine.startsWith("GET / ") || requestLine.startsWith("GET / HTTP")) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/html");
     client.println("Connection: close");
@@ -458,6 +598,26 @@ static void handle_http_client(WiFiClient client) {
       client.print("log client slots full, try again shortly\r\n");
       client.stop();
     }
+  } else if (requestLine.startsWith("GET /rescan")) {
+    g_force_rescan = true;
+    log_line("[RESCAN] requested via HTTP");
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/plain");
+    client.println("Connection: close");
+    client.println();
+    client.print("rescan requested\r\n");
+    client.stop();
+  } else if (requestLine.startsWith("GET /reboot")) {
+    log_line("[REBOOT] requested via HTTP, restarting now");
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/plain");
+    client.println("Connection: close");
+    client.println();
+    client.print("rebooting\r\n");
+    client.flush();
+    client.stop();
+    delay(200);
+    ESP.restart();
   } else if (requestLine.startsWith("GET /status")) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -471,6 +631,9 @@ static void handle_http_client(WiFiClient client) {
     client.print(WiFi.RSSI());
     client.print(",\"ble_connected\":");
     client.print(g_ble_connected ? "true" : "false");
+    client.print(",\"wifi_mac\":\"");
+    client.print(WiFi.macAddress());
+    client.print("\"");
     client.println("}");
     client.stop();
   } else {

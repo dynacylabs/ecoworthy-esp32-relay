@@ -16,26 +16,49 @@ protocol can be figured out from real traffic.
 
 - Joins WiFi (`ITBurnsWhenIP-CAMS`, hidden SSID, static IP `192.168.2.4` —
   see "Network assumptions" below).
-- Scans for BLE devices, picks the best match by name (`ecoworthy`/`bw0f`/
-  `bms`/`jbd`) or JBD-like service UUID hints. Falls back to strongest RSSI
-  if nothing matches (useful on the bench where the BW0F isn't in range; at
-  the hobocamp it should normally be the only/strongest BLE device back
-  there).
-- Connects, discovers all services/characteristics, reads anything
-  readable, subscribes to every notify/indicate characteristic, and logs
-  it all with a hex + ASCII dump.
-- Runs BLE scanning/connecting on its own FreeRTOS task so a long scan
-  never blocks WiFi, OTA, or the HTTP server.
+- Scans for BLE devices (10s), then connects to **every** device it found,
+  one at a time — not just a best guess. For each: discovers all
+  services/characteristics, reads anything readable, subscribes to every
+  notify/indicate characteristic, listens for ~8s to catch some live
+  traffic, then disconnects and moves to the next device. Once it's been
+  through all of them, it scans again — forever. Useful since we don't
+  know for certain what the BW0F identifies as; this way nothing gets
+  missed just because a name/service heuristic didn't match it.
+- Runs BLE scanning/connecting on its own FreeRTOS task so a long scan or
+  slow connect attempt never blocks WiFi, OTA, or the HTTP server.
 - Serves the log over HTTP:
   - `http://192.168.2.4/` — live-scrolling terminal-style page (uses
-    Server-Sent Events, no external JS/CSS, works in any browser).
+    Server-Sent Events, no external JS/CSS, works in any browser). Has
+    **Rescan BLE** and **Reboot** buttons in the top bar.
   - `http://192.168.2.4/stream` — plain-text live tail, e.g. `curl -N
     http://192.168.2.4/stream`.
+  - `http://192.168.2.4/rescan` — abandons whatever device it's currently
+    exploring and immediately starts a fresh scan cycle over all devices.
+    Does not reboot the chip or drop WiFi/OTA/log viewers.
+  - `http://192.168.2.4/reboot` — full `ESP.restart()`. Drops WiFi/log
+    viewers for a few seconds; use `/rescan` instead unless you actually
+    need a full restart.
   - `http://192.168.2.4/status` — JSON health check (uptime, free heap,
     WiFi RSSI, BLE connection state).
   - Also mirrored to USB serial (115200 baud) the whole time.
-- ArduinoOTA on port 3232, password-protected, so phase 2 firmware can be
-  pushed without physical access.
+- ArduinoOTA on port 3232, password-protected. Kept in the code, but in
+  practice it was unreliable once the device was deployed across the
+  hobocamp's HaLow bridge (`espota`'s handshake needs the device to open a
+  fresh outbound connection back to the uploading machine, which doesn't
+  survive a lossy/asymmetric link well). Use the HTTP push method below
+  instead for anything beyond a same-LAN update.
+- `POST /update?token=<OTA_PASSWORD>` — the reliable update path. A single
+  one-directional TCP push (client -> device, no callback connection
+  needed), streamed straight to flash via the ESP32 `Update` library.
+  Verifies an `X-Firmware-MD5` header against the actual bytes received
+  and only reboots into the new image if the write completes *and* the
+  MD5 matches; any failure leaves the currently-running firmware
+  untouched. See "Deploying updates" below.
+
+**Bootstrap note:** `/update` only exists in firmware that already has it
+baked in. The very first time it's introduced to an already-deployed
+device, it has to arrive via USB (or a successful ArduinoOTA push) — after
+that, every future update can go through `/update`.
 
 ## Flashing
 
@@ -53,9 +76,24 @@ tolerating the default 80MHz DIO read speed — already worked around via
 `pio run -t erase` before reflashing so a stale bootloader/partition table
 isn't left behind.
 
-## Deploying updates over OTA (phase 2)
+## Deploying updates
 
-Once the device is running and reachable on the network:
+**Preferred: HTTP push (`tools/push_update.py`).** Reliable over the
+hobocamp's bridge link since it's a single one-directional TCP connection,
+unlike ArduinoOTA below.
+
+```bash
+pio run -e esp32-c3-devkitm-1
+python tools/push_update.py .pio/build/esp32-c3-devkitm-1/firmware.bin \
+    --host 192.168.2.4 --token <OTA_PASSWORD from secrets.h>
+```
+
+It computes the MD5, POSTs the binary with an `X-Firmware-MD5` header, and
+prints the device's response. The device only reboots if the whole image
+was received and the MD5 matched; a failed/interrupted push leaves it
+running the old firmware, so it's safe to retry.
+
+**Fallback: ArduinoOTA (`espota`, same-LAN only).**
 
 ```bash
 # PowerShell
@@ -73,7 +111,7 @@ The OTA password is deliberately alphanumeric-only and separate from the
 WiFi password — PlatformIO's `upload_flags` pass through SCons variable
 substitution, and a literal `$` in the value gets silently treated as a
 (nonexistent) SCons variable and dropped, breaking auth. Keep it that way
-if you change it.
+if you change it. This same password also gates `/update`'s `?token=`.
 
 ## Secrets
 
