@@ -93,6 +93,22 @@ prints the device's response. The device only reboots if the whole image
 was received and the MD5 matched; a failed/interrupted push leaves it
 running the old firmware, so it's safe to retry.
 
+**When working from the field on a cellular hotspot** (no direct route to
+`192.168.2.4`, only Tailscale): relay the push through `mac-mini`, which
+sits on the home LAN and has a direct route to the device.
+
+```bash
+bash tools/push_via_relay.sh .pio/build/esp32-c3-devkitm-1/firmware.bin <OTA_PASSWORD>
+```
+
+This scp's the built binary to `mac-mini` over Tailscale, `git pull`s
+`~/ecoworthy-esp32-relay` there to pick up the latest `push_update.py`,
+and runs it from `mac-mini` against `192.168.2.4`. `mac-mini` also has
+this laptop's SSH key installed for passwordless access, and a clone of
+this repo — set up once, reusable for every future deploy. Same idea works
+for ad hoc validation while in the field:
+`ssh austinc@mac-mini curl -s http://192.168.2.4/status`.
+
 **Fallback: ArduinoOTA (`espota`, same-LAN only).**
 
 ```bash
