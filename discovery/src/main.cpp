@@ -21,7 +21,7 @@
 
 // Bump manually whenever a new build is published, so /status makes it
 // easy to confirm a push actually landed.
-#define FIRMWARE_VERSION "2026-07-24.2"
+#define FIRMWARE_VERSION "2026-07-24.3"
 
 // ===================== Log fan-out =====================
 
@@ -300,8 +300,20 @@ static void explore_and_subscribe(BLEAdvertisedDevice *target) {
       }
 
       if (ch->canNotify() || ch->canIndicate()) {
-        ch->registerForNotify(on_ble_notify);
-        log_line("[SUBSCRIBE] " + addr + " char=" + String(ch->getUUID().toString().c_str()));
+        std::string uuidLower = lower_copy(ch->getUUID().toString());
+        if (uuidLower.find("00002a05") != std::string::npos) {
+          // Standard "Service Changed" characteristic (Generic Attribute
+          // service, GATT-cache-invalidation housekeeping, not
+          // telemetry). Confirmed live: registerForNotify() on this
+          // specific indicate-only characteristic hangs indefinitely -
+          // the CCCD write's response never arrives, and the BLE library
+          // has no internal timeout on that wait. Costs nothing to skip.
+          log_line("[SKIP] " + addr + " char=" + String(ch->getUUID().toString().c_str()) +
+                   " (known to hang registerForNotify(), not telemetry)");
+        } else {
+          ch->registerForNotify(on_ble_notify);
+          log_line("[SUBSCRIBE] " + addr + " char=" + String(ch->getUUID().toString().c_str()));
+        }
       }
     }
   }
