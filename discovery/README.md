@@ -1,10 +1,10 @@
 # hobocamp-bw0f-logger (phase 1)
 
 ESP32-C3 firmware for the hobocamp deployment. Connects to the EcoWorthy
-BW0F over BLE, logs everything it can see (advertisements, GATT services/
-characteristics, every notify/indicate payload) and makes that log visible
-in real time over IP. Supports OTA so phase 2 (real decoding/parsing) can be
-pushed wirelessly once the device is out at the hobocamp.
+BW0F over BLE, logs everything it can see (GATT services/characteristics,
+every notify/indicate payload) and makes that log visible in real time over
+IP. Supports OTA so phase 2 (real decoding/parsing) can be pushed
+wirelessly without physical access.
 
 This is a standalone PlatformIO/Arduino project. It deliberately doesn't
 try to map known sensors (e.g. via ESPHome's `ble_client` platform, which
@@ -15,15 +15,35 @@ protocol can be figured out from real traffic.
 ## What it does
 
 - Joins WiFi (`ITBurnsWhenIP-CAMS`, hidden SSID, static IP `192.168.2.4` —
-  see "Network assumptions" below).
-- Scans for BLE devices (10s), then connects to **every** device it found,
-  one at a time — not just a best guess. For each: discovers all
+  see "Network assumptions" below). WiFi modem sleep is explicitly disabled
+  (`WiFi.setSleep(false)`) — this device is externally powered, and sleep
+  otherwise adds multi-second latency spikes to inbound traffic.
+- Scans for BLE devices, connects to the **one target device** (confirmed
+  live: `e8:ca:50:42:16:c2`, advertises as `"ECO-WORTHY 0F_16C1"` —
+  configured via `TARGET_MAC` in `secrets.h`; falls back to name-hint
+  matching if `TARGET_MAC` isn't set), discovers all its
   services/characteristics, reads anything readable, subscribes to every
-  notify/indicate characteristic, listens for ~8s to catch some live
-  traffic, then disconnects and moves to the next device. Once it's been
-  through all of them, it scans again — forever. Useful since we don't
-  know for certain what the BW0F identifies as; this way nothing gets
-  missed just because a name/service heuristic didn't match it.
+  notify/indicate characteristic, and **stays connected indefinitely** —
+  it does not disconnect and does not rescan on a timer. Notify/indicate
+  traffic streams via callback for as long as the connection holds. Only
+  rescans if actually disconnected, a rescan is requested, or coming back
+  from a paused (OTA in progress) state.
+  - This matters a lot for responsiveness: the ESP32-C3 has a single
+    2.4GHz radio shared between WiFi and BLE. Active BLE scanning is
+    radio-intensive and measurably starves WiFi (confirmed live: WiFi RSSI
+    reported as low as -91dBm while continuously scanning, despite the
+    device sitting immediately next to the AP — recovered to -22dBm once
+    idle). Staying connected once found, instead of continuously
+    scanning/reconnecting, leaves WiFi far more airtime.
+- Logs a heartbeat line every 15s while connected-but-quiet, both so the
+  log clearly shows "still alive, just no data right now" and to keep the
+  stall watchdog (below) from false-firing during a legitimate quiet
+  stretch.
+- Self-recovery watchdog: if the BLE task produces zero log activity for
+  40s (the notify-callback library has been observed to hang indefinitely
+  inside a single blocking call with no internal timeout — seen stuck on
+  a custom/non-standard service's characteristics), the device reboots
+  itself rather than requiring a manual `/reboot`.
 - Runs BLE scanning/connecting on its own FreeRTOS task so a long scan or
   slow connect attempt never blocks WiFi, OTA, or the HTTP server.
 - Serves the log over HTTP:
@@ -32,40 +52,40 @@ protocol can be figured out from real traffic.
     **Rescan BLE** and **Reboot** buttons in the top bar.
   - `http://192.168.2.4/stream` — plain-text live tail, e.g. `curl -N
     http://192.168.2.4/stream`.
-  - `http://192.168.2.4/rescan` — abandons whatever device it's currently
-    exploring and immediately starts a fresh scan cycle over all devices.
-    Does not reboot the chip or drop WiFi/OTA/log viewers.
+  - `http://192.168.2.4/rescan` — disconnects (if connected) and
+    immediately starts a fresh scan. Does not reboot the chip or drop
+    WiFi/OTA/log viewers.
   - `http://192.168.2.4/reboot` — full `ESP.restart()`. Drops WiFi/log
     viewers for a few seconds; use `/rescan` instead unless you actually
     need a full restart.
   - `http://192.168.2.4/status` — JSON health check (uptime, free heap,
-    WiFi RSSI, BLE connection state).
+    WiFi RSSI, BLE connection state, firmware version, whether BLE is
+    currently paused for an OTA transfer).
   - Also mirrored to USB serial (115200 baud) the whole time.
-- ArduinoOTA on port 3232, password-protected. Kept in the code, but in
-  practice it was unreliable once the device was deployed across the
-  hobocamp's HaLow bridge (`espota`'s handshake needs the device to open a
-  fresh outbound connection back to the uploading machine, which doesn't
-  survive a lossy/asymmetric link well). Use the HTTP push method below
-  instead for anything beyond a same-LAN update.
-- `POST /update?token=<OTA_PASSWORD>` — the reliable update path. A single
-  one-directional TCP push (client -> device, no callback connection
-  needed), streamed straight to flash via the ESP32 `Update` library.
-  Verifies an `X-Firmware-MD5` header against the actual bytes received
-  and only reboots into the new image if the write completes *and* the
-  MD5 matches; any failure leaves the currently-running firmware
-  untouched. See "Deploying updates" below.
-
-**Bootstrap note:** `/update` only exists in firmware that already has it
-baked in. The very first time it's introduced to an already-deployed
-device, it has to arrive via USB (or a successful ArduinoOTA push) — after
-that, every future update can go through `/update`.
+- One OTA path, deliberately: **`POST /update`** (push, one-directional,
+  MD5-verified). ArduinoOTA (`espota`) and a device-initiated pull-updater
+  were both tried and removed — ArduinoOTA needs the device to open a
+  fresh outbound connection back to the uploading machine, which
+  repeatedly failed in the field (both across VLANs and same-VLAN — the
+  real bottleneck is BLE/WiFi radio contention on the device itself, not
+  routing); the pull-updater added a meaningfully larger dependency
+  (`HTTPClient`/`HTTPUpdate`, ~9% more flash) for a mechanism that was
+  never actually verified working in the field. `/update` is the one
+  path that's been proven repeatedly today. See "Deploying updates"
+  below.
+- `pause_ble_for_update()` runs before any transfer starts — stops the
+  active BLE connection/scan so the transfer gets clean WiFi airtime
+  instead of competing with BLE for the radio. Resumed on every exit path
+  except final success (which reboots anyway).
 
 ## Flashing
 
-First flash must be over USB (board is on `COM5` here):
+First flash must be over USB (board enumerates as a `USB Serial Device`,
+VID `303A` / PID `1001` — port letter isn't stable across replugs, check
+Device Manager):
 
 ```bash
-pio run -t upload
+pio run -e esp32-c3-devkitm-1 -t upload --upload-port COM5
 ```
 
 If you ever see the board stuck resetting in a fast loop (ROM banner
@@ -76,11 +96,13 @@ tolerating the default 80MHz DIO read speed — already worked around via
 `pio run -t erase` before reflashing so a stale bootloader/partition table
 isn't left behind.
 
-## Deploying updates
+If `pio run -t upload` fails to even open the port
+(`PermissionError 13 "device attached to the system is not functioning"`
+on Windows) even though Device Manager shows it as healthy, that's usually
+a genuinely flaky USB connection (bad cable/port), not a driver/software
+issue — try a different cable/port, or a full laptop reboot.
 
-**Preferred: HTTP push (`tools/push_update.py`).** Reliable over the
-hobocamp's bridge link since it's a single one-directional TCP connection,
-unlike ArduinoOTA below.
+## Deploying updates
 
 ```bash
 pio run -e esp32-c3-devkitm-1
@@ -88,61 +110,57 @@ python tools/push_update.py .pio/build/esp32-c3-devkitm-1/firmware.bin \
     --host 192.168.2.4 --token <OTA_PASSWORD from secrets.h>
 ```
 
-It computes the MD5, POSTs the binary with an `X-Firmware-MD5` header, and
-prints the device's response. The device only reboots if the whole image
-was received and the MD5 matched; a failed/interrupted push leaves it
-running the old firmware, so it's safe to retry.
+Computes the MD5, POSTs the binary with an `X-Firmware-MD5` header, prints
+the device's response. Only reboots if the whole image was received *and*
+the MD5 matched; a failed/interrupted push leaves it running the old
+firmware, so it's always safe to retry. In practice, on a congested link
+this can take many retries — that's expected, not a sign something's
+broken; each attempt is fully safe regardless of how many fail first.
 
-**When working from the field on a cellular hotspot** (no direct route to
-`192.168.2.4`, only Tailscale): relay the push through `mac-mini`, which
-sits on the home LAN and has a direct route to the device.
+When this machine can't reach `192.168.2.4` directly (e.g. on a cellular
+hotspot in the field), relay through `mac-mini`, which is dual-homed onto
+the hobocamp's VLAN (`192.168.2.9`) and reachable from anywhere via
+Tailscale:
 
 ```bash
 bash tools/push_via_relay.sh .pio/build/esp32-c3-devkitm-1/firmware.bin <OTA_PASSWORD>
 ```
 
-This scp's the built binary to `mac-mini` over Tailscale, `git pull`s
-`~/ecoworthy-esp32-relay` there to pick up the latest `push_update.py`,
-and runs it from `mac-mini` against `192.168.2.4`. `mac-mini` also has
-this laptop's SSH key installed for passwordless access, and a clone of
-this repo — set up once, reusable for every future deploy. Same idea works
-for ad hoc validation while in the field:
-`ssh austinc@mac-mini curl -s http://192.168.2.4/status`.
+Same idea for ad hoc status checks: `ssh austinc@mac-mini curl -s
+http://192.168.2.4/status`.
 
-**Fallback: ArduinoOTA (`espota`, same-LAN only).**
-
-```bash
-# PowerShell
-$env:OTA_PASSWORD = "<value from secrets.h>"
-pio run -e esp32-c3-devkitm-1-ota -t upload
-```
-
-```bash
-# bash
-export OTA_PASSWORD="<value from secrets.h>"
-pio run -e esp32-c3-devkitm-1-ota -t upload
-```
+**Bootstrap note:** `/update` only exists in firmware that already has
+that code baked in. The very first time it's introduced to an
+already-deployed device, it has to arrive via USB — after that, every
+future update can go through `/update`.
 
 The OTA password is deliberately alphanumeric-only and separate from the
-WiFi password — PlatformIO's `upload_flags` pass through SCons variable
-substitution, and a literal `$` in the value gets silently treated as a
-(nonexistent) SCons variable and dropped, breaking auth. Keep it that way
-if you change it. This same password also gates `/update`'s `?token=`.
+WiFi password — an earlier ArduinoOTA-based path's `upload_flags` passed
+through SCons variable substitution, and a literal `$` in the value got
+silently treated as a (nonexistent) SCons variable and dropped, breaking
+auth. Keep it that way if you change it. `tools/push_update.py` doesn't
+have that specific problem (no SCons involved), but there's no reason to
+reintroduce a `$` either.
 
 ## Secrets
 
 `include/secrets.h` is gitignored (see repo-root `.gitignore`). Copy
 `include/secrets.h.example` to `include/secrets.h` and fill in real values
-before building.
+before building. Includes `TARGET_MAC` — the exact BLE MAC to target;
+leave undefined to fall back to name-hint matching instead.
 
 ## Network assumptions
 
 The hobocamp WiFi (`ITBurnsWhenIP-CAMS`) is the downstream 2.4GHz side of
-the property's HaLow point-to-point bridge. Static IP `192.168.2.4` is
-configured with gateway `192.168.2.1` / mask `255.255.255.0` — a guess
-from the requested `.4` address in that /24. If the real gateway/subnet
-differs, WiFi association will still succeed but routing may be wrong;
-update `WIFI_GATEWAY`/`WIFI_SUBNET` in `secrets.h` if so.
+the property's HaLow point-to-point bridge, on VLAN 2 (`192.168.2.0/24`).
+Static IP `192.168.2.4` is configured with gateway `192.168.2.1` / mask
+`255.255.255.0`. `mac-mini` is dual-homed onto both the home LAN
+(`192.168.1.100`) and VLAN 2 (`192.168.2.9`), used as the relay/OTA-server
+host specifically so it has a direct, same-subnet path to the device
+without crossing the VLAN1/VLAN2 firewall boundary (confirmed: that
+firewall blocks VLAN2-initiated connections back to VLAN1, which is also
+why ArduinoOTA's reverse-connection requirement fails from a laptop that
+isn't on VLAN 2).
 
 ## Known limitations (phase 1 scope)
 
@@ -153,8 +171,14 @@ update `WIFI_GATEWAY`/`WIFI_SUBNET` in `secrets.h` if so.
 - Up to 4 concurrent log viewers (HTML + `/stream` combined).
 - No parsing/decoding of the BW0F's actual protocol yet — that's phase 2,
   once real traffic has been captured from the log to reverse-engineer the
-  field layout.
-- BLE scan step blocks for ~10s at boot and after any disconnect before
-  WiFi/OTA/HTTP become reachable again (each runs in its own task, but a
-  cold boot's initial WiFi connect + first BLE scan happen sequentially in
-  `setup()`/the BLE task, not in parallel with each other).
+  field layout. Relatedly: this firmware never *writes* anything to the
+  device besides subscribing to notify/indicate (CCCD writes) — some
+  BMS/JBD-style protocols require an explicit "start streaming" command
+  write before they'll send periodic telemetry. If the log goes quiet
+  after "subscribed... staying connected" with no NOTIFY lines ever
+  appearing, that's the likely reason, and figuring out that command is
+  part of the phase 2 protocol work.
+- BLE scan step blocks for ~10s at boot and after any disconnect before a
+  connection is (re)established (runs in its own task, so WiFi/OTA/HTTP
+  stay responsive throughout — just the BLE side itself is blocked for
+  that window).

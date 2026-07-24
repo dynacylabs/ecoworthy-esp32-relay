@@ -7,7 +7,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
-#include <ArduinoOTA.h>
 #include <Update.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
@@ -19,6 +18,10 @@
 #include <set>
 #include <map>
 #include "secrets.h"
+
+// Bump manually whenever a new build is published, so /status makes it
+// easy to confirm a push actually landed.
+#define FIRMWARE_VERSION "2026-07-24.2"
 
 // ===================== Log fan-out =====================
 
@@ -46,9 +49,21 @@ static String sse_escape(const String &line) {
   return out;
 }
 
+static volatile uint32_t g_last_activity_ms = 0;
+
 static void log_line(const String &msg) {
+  g_last_activity_ms = millis();
   String stamped = "[" + String(millis() / 1000.0, 3) + "] " + msg;
   Serial.println(stamped);
+
+  // Copy out client handles under the lock, then write outside it - a slow
+  // or half-dead client's write shouldn't stall everyone else waiting on
+  // this mutex (HTTP handler adding new clients, /status, etc.). Actually
+  // pruning dead clients stays in loop(), which already does it every
+  // iteration; a dead client is just skipped here for this one line.
+  WiFiClient targets[MAX_LOG_CLIENTS];
+  bool targetSse[MAX_LOG_CLIENTS];
+  bool targetValid[MAX_LOG_CLIENTS];
 
   xSemaphoreTake(g_log_mutex, portMAX_DELAY);
   g_ring[g_ring_head] = stamped;
@@ -57,22 +72,25 @@ static void log_line(const String &msg) {
 
   for (size_t i = 0; i < MAX_LOG_CLIENTS; i++) {
     LogClient &lc = g_log_clients[i];
-    if (!lc.in_use) continue;
-    if (!lc.client.connected()) {
-      lc.client.stop();
-      lc.in_use = false;
-      continue;
-    }
-    if (lc.sse) {
-      lc.client.print("data: ");
-      lc.client.print(sse_escape(stamped));
-      lc.client.print("\n\n");
-    } else {
-      lc.client.print(stamped);
-      lc.client.print("\r\n");
+    targetValid[i] = lc.in_use;
+    if (lc.in_use) {
+      targets[i] = lc.client;
+      targetSse[i] = lc.sse;
     }
   }
   xSemaphoreGive(g_log_mutex);
+
+  for (size_t i = 0; i < MAX_LOG_CLIENTS; i++) {
+    if (!targetValid[i] || !targets[i].connected()) continue;
+    if (targetSse[i]) {
+      targets[i].print("data: ");
+      targets[i].print(sse_escape(stamped));
+      targets[i].print("\n\n");
+    } else {
+      targets[i].print(stamped);
+      targets[i].print("\r\n");
+    }
+  }
 }
 
 static String bytes_to_hex(const uint8_t *data, size_t len) {
@@ -132,23 +150,72 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   }
 };
 
+#ifdef TARGET_MAC
+static bool is_target_mac(BLEAdvertisedDevice &dev) {
+  return lower_copy(dev.getAddress().toString()) == lower_copy(std::string(TARGET_MAC));
+}
+#endif
+
+// Fallback for when TARGET_MAC isn't set. The real device advertises as
+// "ECO-WORTHY 0F_16C1" - note the hyphen, which an earlier version of this
+// check didn't handle (only "ecoworthy"/"eco worthy" - matched nothing on
+// the real hardware, silently fell through to RSSI-fallback the whole time).
+static bool is_name_hint_match(BLEAdvertisedDevice &dev) {
+  if (!dev.haveName()) return false;
+  const std::string name = lower_copy(dev.getName());
+  return name.find("ecoworthy") != std::string::npos ||
+         name.find("eco-worthy") != std::string::npos ||
+         name.find("eco worthy") != std::string::npos ||
+         name.find("bw0f") != std::string::npos ||
+         name.find("jbd") != std::string::npos ||
+         name.find("bms") != std::string::npos;
+}
+
+// Only returns a device we actually want to connect to - no RSSI-fallback
+// to "whatever's strongest," since that just wastes a connection+GATT
+// discovery cycle (and BLE radio time that WiFi needs) on someone's phone
+// or watch. Returns nullptr if the target isn't in this scan's results.
+static BLEAdvertisedDevice *pick_target() {
+#ifdef TARGET_MAC
+  for (BLEAdvertisedDevice *dev : g_discovered) {
+    if (is_target_mac(*dev)) return dev;
+  }
+  return nullptr;
+#else
+  BLEAdvertisedDevice *best = nullptr;
+  for (BLEAdvertisedDevice *dev : g_discovered) {
+    if (is_name_hint_match(*dev)) {
+      if (best == nullptr || dev->getRSSI() > best->getRSSI()) best = dev;
+    }
+  }
+  return best;
+#endif
+}
+
 // ===================== BLE connect / subscribe / log =====================
 
 static bool g_ble_connected = false;
 static BLEClient *g_ble_client = nullptr;
 static volatile bool g_force_rescan = false;
-static const uint32_t NOTIFY_WINDOW_MS = 8000;
+// ESP32-C3 has a single 2.4GHz radio shared between WiFi and BLE. Heavy BLE
+// scan/connect activity measurably starves WiFi (seen as WiFi.RSSI()
+// reporting garbage and dropped packets even sitting right next to the AP).
+// Set while an OTA transfer is in progress so it gets clean airtime instead
+// of competing with BLE for the radio.
+static volatile bool g_ble_paused = false;
 
-// Sleeps up to ms, bailing out early if a rescan was requested. Returns true
-// if it bailed early.
-static bool wait_or_rescan(uint32_t ms) {
-  uint32_t waited = 0;
-  while (waited < ms) {
-    if (g_force_rescan) return true;
-    vTaskDelay(pdMS_TO_TICKS(200));
-    waited += 200;
+static void pause_ble_for_update() {
+  g_ble_paused = true;
+  BLEDevice::getScan()->stop();
+  if (g_ble_client != nullptr && g_ble_client->isConnected()) {
+    g_ble_client->disconnect();
   }
-  return false;
+  log_line("[BLE] paused for firmware update");
+}
+
+static void resume_ble_after_update() {
+  g_ble_paused = false;
+  log_line("[BLE] resumed after firmware update");
 }
 
 static void on_ble_notify(BLERemoteCharacteristic *ch, uint8_t *data, size_t length, bool isNotify) {
@@ -170,18 +237,20 @@ class ClientCallbacks : public BLEClientCallbacks {
   }
 };
 
-// Connects to one device, logs every service/characteristic/read, subscribes
-// to every notify/indicate characteristic, listens for a while, then
-// disconnects so the next device in this scan cycle can be explored.
-static void explore_and_subscribe(BLEAdvertisedDevice *target, size_t idx, size_t total) {
+// Connects to the target device, logs every service/characteristic/read,
+// and subscribes to every notify/indicate characteristic. Deliberately
+// does NOT disconnect afterward - stays connected indefinitely so
+// on_ble_notify() keeps streaming for as long as the peripheral sends
+// data, and so the radio sits idle (cheap) instead of actively scanning
+// (expensive, competes with WiFi) once it's found what it's looking for.
+static void explore_and_subscribe(BLEAdvertisedDevice *target) {
   if (g_ble_client == nullptr) {
     g_ble_client = BLEDevice::createClient();
     g_ble_client->setClientCallbacks(new ClientCallbacks());
   }
 
   String addr = String(target->getAddress().toString().c_str());
-  log_line("[BLE] (" + String(static_cast<int>(idx)) + "/" + String(static_cast<int>(total)) +
-           ") connecting to " + addr);
+  log_line("[BLE] connecting to " + addr);
 
   if (!g_ble_client->connect(target)) {
     log_line("[BLE] connect failed: " + addr);
@@ -190,109 +259,160 @@ static void explore_and_subscribe(BLEAdvertisedDevice *target, size_t idx, size_
   g_ble_connected = true;
 
   std::map<std::string, BLERemoteService *> *services = g_ble_client->getServices();
-  bool has_notify = false;
 
   if (services == nullptr || services->empty()) {
     log_line("[BLE] no GATT services discovered on " + addr);
-  } else {
-    log_line("[BLE] " + addr + " has " + String(static_cast<int>(services->size())) + " service(s)");
+    if (g_ble_client->isConnected()) g_ble_client->disconnect();
+    g_ble_connected = false;
+    return;
+  }
 
-    for (const auto &service_entry : *services) {
-      if (g_force_rescan) break;
-      BLERemoteService *svc = service_entry.second;
-      log_line("[SERVICE] " + addr + " " + String(service_entry.first.c_str()));
+  log_line("[BLE] " + addr + " has " + String(static_cast<int>(services->size())) + " service(s)");
 
-      std::map<std::string, BLERemoteCharacteristic *> *chars = svc->getCharacteristics();
-      if (chars == nullptr || chars->empty()) continue;
+  for (const auto &service_entry : *services) {
+    if (g_force_rescan || g_ble_paused) break;
+    BLERemoteService *svc = service_entry.second;
+    log_line("[SERVICE] " + addr + " " + String(service_entry.first.c_str()));
 
-      for (const auto &char_entry : *chars) {
-        BLERemoteCharacteristic *ch = char_entry.second;
+    std::map<std::string, BLERemoteCharacteristic *> *chars = svc->getCharacteristics();
+    if (chars == nullptr || chars->empty()) continue;
 
-        String flags;
-        if (ch->canRead()) flags += "read,";
-        if (ch->canNotify()) flags += "notify,";
-        if (ch->canIndicate()) flags += "indicate,";
-        if (ch->canWrite()) flags += "write,";
-        if (ch->canWriteNoResponse()) flags += "write_no_response,";
+    for (const auto &char_entry : *chars) {
+      BLERemoteCharacteristic *ch = char_entry.second;
 
-        log_line("[CHARACTERISTIC] " + addr + " " + String(char_entry.first.c_str()) + " flags=" + flags);
+      String flags;
+      if (ch->canRead()) flags += "read,";
+      if (ch->canNotify()) flags += "notify,";
+      if (ch->canIndicate()) flags += "indicate,";
+      if (ch->canWrite()) flags += "write,";
+      if (ch->canWriteNoResponse()) flags += "write_no_response,";
 
-        if (ch->canRead()) {
-          std::string value = ch->readValue();
-          if (!value.empty()) {
-            log_line("[READ] " + addr + " char=" + String(ch->getUUID().toString().c_str()) +
-                      " len=" + String(static_cast<int>(value.size())) +
-                      " hex=" + bytes_to_hex(reinterpret_cast<const uint8_t *>(value.data()), value.size()) +
-                      " ascii=\"" + bytes_to_ascii(reinterpret_cast<const uint8_t *>(value.data()), value.size()) + "\"");
-          }
-        }
+      log_line("[CHARACTERISTIC] " + addr + " " + String(char_entry.first.c_str()) + " flags=" + flags);
 
-        if (ch->canNotify() || ch->canIndicate()) {
-          ch->registerForNotify(on_ble_notify);
-          log_line("[SUBSCRIBE] " + addr + " char=" + String(ch->getUUID().toString().c_str()));
-          has_notify = true;
+      if (ch->canRead()) {
+        std::string value = ch->readValue();
+        if (!value.empty()) {
+          log_line("[READ] " + addr + " char=" + String(ch->getUUID().toString().c_str()) +
+                    " len=" + String(static_cast<int>(value.size())) +
+                    " hex=" + bytes_to_hex(reinterpret_cast<const uint8_t *>(value.data()), value.size()) +
+                    " ascii=\"" + bytes_to_ascii(reinterpret_cast<const uint8_t *>(value.data()), value.size()) + "\"");
         }
       }
-    }
 
-    if (has_notify && !g_force_rescan) {
-      log_line("[BLE] listening to " + addr + " for " + String(static_cast<int>(NOTIFY_WINDOW_MS / 1000)) + "s");
-      wait_or_rescan(NOTIFY_WINDOW_MS);
+      if (ch->canNotify() || ch->canIndicate()) {
+        ch->registerForNotify(on_ble_notify);
+        log_line("[SUBSCRIBE] " + addr + " char=" + String(ch->getUUID().toString().c_str()));
+      }
     }
   }
 
-  if (g_ble_client->isConnected()) {
-    g_ble_client->disconnect();
-  }
-  g_ble_connected = false;
-  vTaskDelay(pdMS_TO_TICKS(300));
+  log_line("[BLE] subscribed to " + addr + ", staying connected and streaming");
 }
 
-// Continuously scans, then explores every device it finds (not just one
-// best guess) before scanning again. Runs on its own task so it never
-// blocks WiFi/OTA/HTTP even during a long scan or a slow connect attempt.
+// Scans for the target device, connects and subscribes once, then just
+// idles while already connected (on_ble_notify does the actual streaming
+// from a different callback context) - only rescans if actually
+// disconnected, paused, or a rescan is explicitly requested. This keeps
+// the radio doing active BLE scanning only when it actually needs to,
+// leaving WiFi far more airtime than continuously exploring every nearby
+// device would.
+static const uint32_t HEARTBEAT_INTERVAL_MS = 15000;
+
 static void ble_task(void *param) {
   static ScanCallbacks scan_callbacks;
   BLEScan *scanner = BLEDevice::getScan();
   scanner->setAdvertisedDeviceCallbacks(&scan_callbacks);
 
+  uint32_t lastHeartbeat = 0;
+
   for (;;) {
+    if (g_ble_paused) {
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+
+    if (g_ble_connected && g_ble_client != nullptr && g_ble_client->isConnected()) {
+      if (g_force_rescan) {
+        log_line("[RESCAN] rescan requested, disconnecting");
+        g_ble_client->disconnect();
+        g_force_rescan = false;
+        continue;
+      }
+      // Idle - streaming happens via on_ble_notify(). Heartbeat keeps the
+      // watchdog satisfied and confirms in the log that we're still
+      // connected even during a stretch with no notify traffic.
+      if (millis() - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
+        lastHeartbeat = millis();
+        log_line("[BLE] still connected, waiting for data");
+      }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
     g_force_rescan = false;
 
     for (BLEAdvertisedDevice *d : g_discovered) delete d;
     g_discovered.clear();
     g_seen_macs.clear();
 
-    log_line("[SCAN] starting 10s BLE scan...");
+    log_line("[SCAN] starting 10s BLE scan for target device...");
     scanner->setActiveScan(true);
     scanner->setInterval(100);
     scanner->setWindow(99);
     scanner->start(10, false);
     scanner->clearResults();
 
-    size_t total = g_discovered.size();
-    log_line("[SCAN] found " + String(static_cast<int>(total)) + " unique device(s); exploring each");
+    if (g_ble_paused) continue;
 
-    for (size_t i = 0; i < total; i++) {
-      if (g_force_rescan) {
-        log_line("[RESCAN] rescan requested, restarting scan cycle");
-        break;
-      }
-      explore_and_subscribe(g_discovered[i], i + 1, total);
+    BLEAdvertisedDevice *target = pick_target();
+    if (target == nullptr) {
+      log_line("[BLE] target not found this scan (" + String(static_cast<int>(g_discovered.size())) +
+               " other device(s) seen), retrying in 5s");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
     }
 
-    if (!g_force_rescan) {
-      log_line("[SCAN] cycle complete, rescanning...");
+    explore_and_subscribe(target);
+  }
+}
+
+// The BLE stack occasionally hangs indefinitely inside a single blocking
+// call (observed: stuck on a custom/non-standard service's characteristics,
+// likely a read or notify-subscribe waiting on a GATT response that never
+// arrives) with no internal timeout. Rather than chase every possible
+// blocking call inside the library, watch for the symptom directly: no log
+// activity at all for too long means the BLE task is stuck somewhere, so
+// force a clean reboot to recover instead of requiring a manual /reboot.
+// The steady-state heartbeat above (every 15s) keeps this from
+// false-firing during normal idle-but-connected stretches.
+static const uint32_t WATCHDOG_STALL_MS = 40000;
+
+static void watchdog_task(void *param) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    uint32_t sinceActivity = millis() - g_last_activity_ms;
+    if (sinceActivity > WATCHDOG_STALL_MS) {
+      Serial.println("[WATCHDOG] no activity for " + String(sinceActivity / 1000) +
+                      "s, BLE task appears stuck - rebooting");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
     }
   }
 }
 
-// ===================== WiFi / OTA / HTTP =====================
+// ===================== WiFi / HTTP =====================
 
 static WiFiServer g_http_server(80);
 
 static void connect_wifi() {
   WiFi.mode(WIFI_STA);
+  // Modem sleep saves power by napping the radio between DTIM beacons,
+  // which adds multi-second latency spikes to inbound traffic even on a
+  // strong link - the AP has to queue packets until the next wake window.
+  // This device is externally powered, not battery-run, so there's no
+  // reason to trade responsiveness for power savings here.
+  WiFi.setSleep(false);
   WiFi.setHostname(DEVICE_HOSTNAME);
 
 #ifdef WIFI_STATIC_IP
@@ -320,17 +440,6 @@ static void connect_wifi() {
   } else {
     Serial.println("[WIFI] not connected yet, will keep retrying in background");
   }
-}
-
-static void setup_ota() {
-  ArduinoOTA.setHostname(DEVICE_HOSTNAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() { log_line("[OTA] update starting"); });
-  ArduinoOTA.onEnd([]() { log_line("[OTA] update complete, rebooting"); });
-  ArduinoOTA.onError([](ota_error_t error) {
-    log_line("[OTA] error code=" + String(static_cast<int>(error)));
-  });
-  ArduinoOTA.begin();
 }
 
 static const char PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
@@ -463,6 +572,11 @@ static void handle_update_upload(WiFiClient client, const String &requestLine, l
     return;
   }
 
+  // Stop competing with WiFi for the shared 2.4GHz radio for the duration
+  // of the transfer - resumed on every exit path below except the final
+  // success path, which reboots anyway.
+  pause_ble_for_update();
+
   log_line("[UPDATE] starting: " + String(contentLength) + " bytes, expected md5=" +
            (expectedMd5.length() ? expectedMd5 : String("(none)")));
 
@@ -473,6 +587,7 @@ static void handle_update_upload(WiFiClient client, const String &requestLine, l
     client.println();
     client.print("Update.begin failed: " + String(Update.errorString()) + "\r\n");
     client.stop();
+    resume_ble_after_update();
     return;
   }
 
@@ -494,6 +609,7 @@ static void handle_update_upload(WiFiClient client, const String &requestLine, l
         log_line("[UPDATE] aborted: connection stalled/closed with " + String(remaining) + " bytes remaining");
         Update.abort();
         client.stop();
+        resume_ble_after_update();
         return;
       }
       continue;
@@ -508,6 +624,7 @@ static void handle_update_upload(WiFiClient client, const String &requestLine, l
       client.println();
       client.print("write failed: " + String(Update.errorString()) + "\r\n");
       client.stop();
+      resume_ble_after_update();
       return;
     }
     remaining -= n;
@@ -526,6 +643,7 @@ static void handle_update_upload(WiFiClient client, const String &requestLine, l
     client.println();
     client.print("Update.end failed: " + String(Update.errorString()) + "\r\n");
     client.stop();
+    resume_ble_after_update();
     return;
   }
 
@@ -633,7 +751,9 @@ static void handle_http_client(WiFiClient client) {
     client.print(g_ble_connected ? "true" : "false");
     client.print(",\"wifi_mac\":\"");
     client.print(WiFi.macAddress());
-    client.print("\"");
+    client.print("\",\"ble_paused\":");
+    client.print(g_ble_paused ? "true" : "false");
+    client.print(",\"firmware_version\":\"" FIRMWARE_VERSION "\"");
     client.println("}");
     client.stop();
   } else {
@@ -651,11 +771,11 @@ void setup() {
   Serial.println("Hobocamp EcoWorthy BW0F Logger - phase 1");
 
   g_log_mutex = xSemaphoreCreateMutex();
+  g_last_activity_ms = millis();
 
   connect_wifi();
   if (WiFi.status() == WL_CONNECTED) {
     MDNS.begin(DEVICE_HOSTNAME);
-    setup_ota();
     g_http_server.begin();
     log_line("[WIFI] connected, ip=" + WiFi.localIP().toString() + " hostname=" DEVICE_HOSTNAME ".local");
     log_line("[HTTP] live log page at http://" + WiFi.localIP().toString() + "/");
@@ -664,6 +784,7 @@ void setup() {
 
   BLEDevice::init("hobocamp-bw0f-logger");
   xTaskCreate(ble_task, "ble_task", 8192, nullptr, 1, nullptr);
+  xTaskCreate(watchdog_task, "watchdog_task", 2048, nullptr, 1, nullptr);
 }
 
 void loop() {
@@ -675,8 +796,6 @@ void loop() {
       WiFi.reconnect();
     }
   }
-
-  ArduinoOTA.handle();
 
   WiFiClient client = g_http_server.available();
   if (client) {
