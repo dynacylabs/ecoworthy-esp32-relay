@@ -48,8 +48,15 @@ def send_once(host: str, port: int, token: str, data: bytes, md5: str,
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.settimeout(chunk_timeout)
-        sock.sendall(request_line.encode())
-        sock.sendall(headers.encode())
+        # Request line + headers in ONE sendall(), not two: the device's
+        # header parser (`while (client.available())`) doesn't robustly
+        # wait for bytes that haven't arrived yet - if headers land in a
+        # separate packet from the request line, it can see nothing
+        # buffered, exit early, miss Content-Length, and reject the
+        # request before the body even finishes sending (seen live as a
+        # "broken pipe" a few KB into the upload). One combined send makes
+        # that race far less likely.
+        sock.sendall((request_line + headers).encode())
 
         sent = 0
         last_pct = -10
