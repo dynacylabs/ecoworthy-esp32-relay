@@ -407,12 +407,14 @@ static WiFiServer g_http_server(80);
 
 static void connect_wifi() {
   WiFi.mode(WIFI_STA);
-  // Modem sleep saves power by napping the radio between DTIM beacons,
-  // which adds multi-second latency spikes to inbound traffic even on a
-  // strong link - the AP has to queue packets until the next wake window.
-  // This device is externally powered, not battery-run, so there's no
-  // reason to trade responsiveness for power savings here.
-  WiFi.setSleep(false);
+  // Deliberately NOT calling WiFi.setSleep(false) here. It was added to
+  // fix WiFi responsiveness, but confirmed via addr2line against a real
+  // crash dump: with sleep disabled, BLEDevice::init() crashes 100% of
+  // the time inside Espressif's precompiled coex_core_enable() (WiFi/BLE
+  // coexistence library) - not our code, no workaround found besides not
+  // disabling sleep. The stay-connected BLE redesign (not continuously
+  // scanning) already addresses most of the responsiveness problem this
+  // was meant to fix, so leaving sleep at its default is the safer trade.
   WiFi.setHostname(DEVICE_HOSTNAME);
 
 #ifdef WIFI_STATIC_IP
@@ -782,6 +784,12 @@ void setup() {
     log_line("[HTTP] plain-text stream at http://" + WiFi.localIP().toString() + "/stream");
   }
 
+  // Initializing BLE immediately after WiFi connects crashes reproducibly
+  // in Espressif's precompiled coexistence library (coex_core_enable,
+  // confirmed via addr2line against a real crash - not our code). Some
+  // settling time avoids it; this was likely masked before by ArduinoOTA's
+  // setup work incidentally providing that delay.
+  delay(1000);
   BLEDevice::init("hobocamp-bw0f-logger");
   xTaskCreate(ble_task, "ble_task", 8192, nullptr, 1, nullptr);
   xTaskCreate(watchdog_task, "watchdog_task", 2048, nullptr, 1, nullptr);
