@@ -1,0 +1,40 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ecoworthy
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: ecoworthy
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - internal
+
+  app:
+    build: ./app
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      DATABASE_URL: postgresql://ecoworthy:changeme@timescaledb:5432/ecoworthy
+      API_TOKEN: changeme
+      # Host/port of the ESPHome device running the bluetooth_proxy
+      # component (see ../esphome-bluetooth-proxy/). The server connects
+      # out to it - the device never initiates anything back to us.
+      ESPHOME_HOST: 192.168.2.4
+      ESPHOME_PORT: "6053"
+      ESPHOME_API_ENCRYPTION_KEY: changeme
+      # MAC address of the EcoWorthy BW0F to poll for.
+      TARGET_BLE_MAC: "e8:ca:50:42:16:c2"
+    ports:
+      - "8080:8080"
+    networks:
+      - internal
+
+networks:
+  internal:
+
+volumes:
+  db-data:
