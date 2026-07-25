@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from aioesphomeapi import APIClient
+from aioesphomeapi import APIClient, BluetoothLEAdvertisement
 
 from config import (
     BLE_CONNECT_TIMEOUT_SECONDS,
@@ -81,6 +81,26 @@ class BLEPoller:
                 pass
             self._client = None
 
+    async def _discover_address_type(self, client: APIClient) -> int | None:
+        """aioesphomeapi (45.x) requires the BLE address type (public/random)
+        up front when connecting - it no longer defaults or infers it. The
+        only way to learn it is from an advertisement, so listen for one
+        from our target MAC before attempting to connect.
+        """
+        found: asyncio.Future[int] = asyncio.get_event_loop().create_future()
+
+        def on_adv(adv: BluetoothLEAdvertisement):
+            if adv.address == TARGET_ADDRESS and not found.done():
+                found.set_result(adv.address_type)
+
+        unsub = client.subscribe_bluetooth_le_advertisements(on_adv)
+        try:
+            return await asyncio.wait_for(found, timeout=BLE_CONNECT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            unsub()
+
     async def _connect_and_stream(self, client: APIClient):
         connected_event = asyncio.Event()
         disconnected_event = asyncio.Event()
@@ -93,9 +113,21 @@ class BLEPoller:
             else:
                 disconnected_event.set()
 
+        device_info = await client.device_info()
+        feature_flags = device_info.bluetooth_proxy_feature_flags_compat(client.api_version)
+
+        logger.info("Waiting for an advertisement from %s to learn its address type ...", TARGET_BLE_MAC)
+        address_type = await self._discover_address_type(client)
+        if address_type is None:
+            logger.warning("Never saw an advertisement from %s, can't connect yet", TARGET_BLE_MAC)
+            return
+
         logger.info("Connecting to BLE device %s ...", TARGET_BLE_MAC)
         remove_listener = await client.bluetooth_device_connect(
-            TARGET_ADDRESS, on_state, timeout=BLE_CONNECT_TIMEOUT_SECONDS,
+            TARGET_ADDRESS, on_state,
+            timeout=BLE_CONNECT_TIMEOUT_SECONDS,
+            feature_flags=feature_flags,
+            address_type=address_type,
         )
 
         try:
