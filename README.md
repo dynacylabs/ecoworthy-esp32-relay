@@ -18,11 +18,16 @@ firmware on hardware that's remote and inconvenient to reach.
 ## Repository layout
 
 - [esphome-bluetooth-proxy/](esphome-bluetooth-proxy/bench.yaml): ESPHome
-  configs for the ESP32-C3. Just WiFi, the native API, OTA, and
+  configs for the ESP32-C3 - `bench.yaml` for the desk unit, `field.yaml`
+  for the actual hobocamp deployment. Just WiFi, the native API, OTA, and
   `bluetooth_proxy` - no custom code. The server always initiates the
   connection to the device (over the native API, port 6053); the device
   never has to reach out anywhere, which matters given the network's VLAN
-  separation (see below).
+  separation (see below). `field.yaml`'s first flash has to happen over
+  USB on site - the device is still running the old custom firmware with
+  a different partition layout, so there's no OTA path until that first
+  flash lands. Every flash after that (including on the bench unit) can
+  go over OTA - confirmed working this session.
 - [server/](server/README.md): the actual dashboard. A background poller
   (`aioesphomeapi`) connects to the ESP32's proxy, connects to the BW0F by
   MAC, subscribes to its data characteristic, and stores every raw payload

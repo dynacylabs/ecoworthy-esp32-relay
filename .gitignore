@@ -2,3 +2,4 @@ esphome-bluetooth-proxy/secrets.yaml
 esphome-bluetooth-proxy/.esphome/
 server/.env
 server/docker-compose.override.yml
+__pycache__/
