@@ -6,16 +6,16 @@ clearing a value (blank string) removes the override and reverts to that
 default.
 
 The effective values are cached in memory after every load()/save(),
-since ble_poller.py and alerts.py consult them on every single BLE
-notification - a DB round trip per reading would be wasteful. current()
-just reads that cache and is safe to call from a hot path.
+since ble_poller.py and alerts.py consult them on every single sensor
+update from the ESP32 - a DB round trip per reading would be wasteful.
+current() just reads that cache and is safe to call from a hot path.
 """
 
 import logging
 
 import config
 
-logger = logging.getLogger("ecoworthy.settings")
+logger = logging.getLogger("victron.settings")
 
 
 class Field:
@@ -40,18 +40,12 @@ class Field:
 SCHEMA: list[Field] = [
     Field(
         "target_ble_mac", str, config.TARGET_BLE_MAC,
-        "Target BLE MAC", "MAC address of the EcoWorthy device to poll for.", "device",
-    ),
-    Field(
-        "ble_connect_timeout_seconds", float, config.BLE_CONNECT_TIMEOUT_SECONDS,
-        "BLE connect timeout (s)",
-        "How long to wait for a BLE connection/service-discovery attempt before giving up and retrying.",
-        "device",
+        "Target BLE MAC", "MAC address of the Victron SmartSolar being tracked (label only - the ESP32 does the actual BLE decoding).", "device",
     ),
     Field(
         "ble_stall_seconds", float, config.BLE_STALL_SECONDS,
         "BLE stall timeout (s)",
-        "Reconnect if no data has been received in this long while connected.", "device",
+        "Fire the offline alert if no sensor update has arrived from the ESP32 in this long.", "device",
     ),
     Field(
         "ntfy_url", str, config.NTFY_URL,
@@ -71,16 +65,6 @@ SCHEMA: list[Field] = [
         "alert_low_voltage_v", float, config.ALERT_LOW_VOLTAGE_V,
         "Low battery voltage (V)",
         "Notify when battery voltage drops below this. Blank disables the check.", "alerts",
-    ),
-    Field(
-        "alert_low_soc_pct", float, config.ALERT_LOW_SOC_PCT,
-        "Low battery charge (%)",
-        "Notify when state of charge drops below this. Blank disables the check.", "alerts",
-    ),
-    Field(
-        "alert_high_temp_c", float, config.ALERT_HIGH_TEMP_C,
-        "High temperature (\u00b0C)",
-        "Notify when temperature rises above this. Blank disables the check.", "alerts",
     ),
     Field(
         "alert_cooldown_seconds", float, config.ALERT_COOLDOWN_SECONDS,

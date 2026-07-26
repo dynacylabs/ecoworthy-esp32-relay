@@ -1,21 +1,21 @@
 """ntfy.sh push notifications for battery/charge-controller alert conditions.
 
-Called from ble_poller.py right after each reading is decoded and stored
-(check_reading) and around BLE connection loss (check_offline). Disabled
-entirely unless the ntfy_topic setting is non-blank.
+Called from ble_poller.py right after each reading is stored
+(check_reading) and around ESPHome/BLE connection loss (check_offline).
+Disabled entirely unless the ntfy_topic setting is non-blank.
 
 All thresholds and ntfy connection details are read fresh from
 settings.current() on every call (not imported once at startup), so
 changes made on the Settings page take effect on the very next reading -
 no restart required.
 
-Each alert condition (low voltage, low charge, high temp, device offline)
-is tracked independently per device, with:
+Each alert condition (low voltage, charger error, device offline) is
+tracked independently per device, with:
 
 - A cooldown, so a persistently-bad reading doesn't turn into a
   notification storm - only one push per condition per alert_cooldown_seconds
   while it stays active.
-- Hysteresis on the numeric thresholds, so a value oscillating right at
+- Hysteresis on the numeric threshold, so a value oscillating right at
   the threshold doesn't fire/clear/fire repeatedly.
 - A "resolved" push once the condition clears, so you know when things
   are back to normal without having to check the dashboard.
@@ -28,11 +28,14 @@ import httpx
 
 import settings
 
-logger = logging.getLogger("ecoworthy.alerts")
+logger = logging.getLogger("victron.alerts")
 
 _VOLTAGE_HYSTERESIS_V = 0.2
-_SOC_HYSTERESIS_PCT = 3.0
-_TEMP_HYSTERESIS_C = 3.0
+
+# ntfy alerts are ANY charger_error value that isn't one of these -
+# "No error" is what the ESPHome component reports during normal
+# operation, empty/None means no reading has arrived yet.
+_NO_ERROR_VALUES = {None, "", "No error"}
 
 # One entry per (mac, alert_key): {"active": bool, "last_sent": monotonic}
 _state: dict[tuple[str, str], dict] = {}
@@ -102,15 +105,12 @@ async def _fire(
 
 
 async def check_reading(mac: str, decoded: dict) -> None:
-    """Run every threshold check against one decoded reading."""
+    """Run every threshold check against one stored reading."""
     current = settings.current()
     low_voltage = current["alert_low_voltage_v"]
-    low_soc = current["alert_low_soc_pct"]
-    high_temp = current["alert_high_temp_c"]
 
     voltage = decoded.get("battery_voltage_v")
-    soc = decoded.get("battery_soc_pct")
-    temp = decoded.get("temperature_c")
+    charger_error = decoded.get("charger_error")
 
     if voltage is not None and low_voltage is not None:
         active = voltage < low_voltage
@@ -124,37 +124,24 @@ async def check_reading(mac: str, decoded: dict) -> None:
                 priority="high", tags="battery,warning",
             )
 
-    if soc is not None and low_soc is not None:
-        active = soc < low_soc
-        cleared = soc > low_soc + _SOC_HYSTERESIS_PCT
-        if active or cleared:
-            await _fire(
-                mac, "low_soc", active,
-                title=f"\u26a0\ufe0f Low battery charge ({mac})",
-                message=f"Battery charge is {soc:.0f}% (threshold {low_soc:.0f}%).",
-                resolved_message=f"Battery charge is back up to {soc:.0f}%.",
-                priority="high", tags="battery,warning",
-            )
-
-    if temp is not None and high_temp is not None:
-        active = temp > high_temp
-        cleared = temp < high_temp - _TEMP_HYSTERESIS_C
-        if active or cleared:
-            await _fire(
-                mac, "high_temp", active,
-                title=f"\U0001f321\ufe0f High temperature ({mac})",
-                message=f"Temperature is {temp:.1f}\u00b0C (threshold {high_temp:.1f}\u00b0C).",
-                resolved_message=f"Temperature is back down to {temp:.1f}\u00b0C.",
-                priority="high", tags="thermometer,warning",
-            )
+    if charger_error is not None:
+        active = charger_error not in _NO_ERROR_VALUES
+        await _fire(
+            mac, "charger_error", active,
+            title=f"\u26a0\ufe0f Charge controller error ({mac})",
+            message=f"Charger error: {charger_error}.",
+            resolved_message="Charger error has cleared - back to normal operation.",
+            priority="high", tags="warning",
+        )
 
 
 async def check_offline(mac: str, offline: bool) -> None:
-    """Alert when the BLE connection is lost/stalled, and when it recovers."""
+    """Alert when the ESP32 stops reporting sensor updates (out of BLE
+    range, or the ESP32 itself unreachable), and when it recovers."""
     await _fire(
         mac, "offline", offline,
         title=f"\U0001f50c Device offline ({mac})",
-        message="No data received over BLE - connection lost or out of range.",
-        resolved_message="BLE connection re-established, data is flowing again.",
+        message="No data received from the ESP32 - BLE out of range, or the ESP32 is unreachable.",
+        resolved_message="Data is flowing again.",
         priority="high", tags="satellite,warning",
     )

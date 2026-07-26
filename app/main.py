@@ -12,10 +12,10 @@ from ble_poller import BLEPoller
 from config import API_TOKEN, ESPHOME_API_ENCRYPTION_KEY, ESPHOME_HOST, ESPHOME_PORT
 from db import close_pool, get_pool
 from migrate import run as run_migrations
-from models import DeviceStatus, RawEventPoint, ReadingPoint
+from models import DeviceStatus, ReadingPoint
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ecoworthy")
+logger = logging.getLogger("victron")
 
 poller = BLEPoller()
 
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title="ecoworthy-dashboard", lifespan=lifespan)
+app = FastAPI(title="victron-dashboard", lifespan=lifespan)
 
 
 async def require_token(token: str):
@@ -61,15 +61,11 @@ async def get_status():
         for d in devices:
             latest = await conn.fetchrow(
                 """
-                SELECT time, battery_voltage_v, battery_current_a, battery_soc_pct,
-                       pv_voltage_v, pv_current_a, pv_power_w,
-                       load_voltage_v, load_current_a, load_power_w, temperature_c
+                SELECT time, battery_voltage_v, battery_current_a,
+                       pv_power_w, yield_today_kwh, load_current_a,
+                       device_state, charger_error
                 FROM readings WHERE device_id = $1 ORDER BY time DESC LIMIT 1
                 """,
-                d["id"],
-            )
-            event_count = await conn.fetchval(
-                "SELECT count(*) FROM raw_events WHERE device_id = $1 AND time > now() - interval '5 minutes'",
                 d["id"],
             )
             result.append(DeviceStatus(
@@ -77,7 +73,6 @@ async def get_status():
                 name=d["name"],
                 last_seen=d["last_seen"],
                 latest=ReadingPoint(**dict(latest)) if latest else None,
-                events_last_5min=event_count or 0,
             ))
         return result
 
@@ -92,14 +87,11 @@ async def get_readings_history(mac: str, hours: float = Query(default=6, gt=0, l
                 time_bucket(make_interval(secs => $3), r.time) AS time,
                 avg(r.battery_voltage_v) AS battery_voltage_v,
                 avg(r.battery_current_a) AS battery_current_a,
-                avg(r.battery_soc_pct) AS battery_soc_pct,
-                avg(r.pv_voltage_v) AS pv_voltage_v,
-                avg(r.pv_current_a) AS pv_current_a,
                 avg(r.pv_power_w) AS pv_power_w,
-                avg(r.load_voltage_v) AS load_voltage_v,
+                (array_agg(r.yield_today_kwh ORDER BY r.time DESC))[1] AS yield_today_kwh,
                 avg(r.load_current_a) AS load_current_a,
-                avg(r.load_power_w) AS load_power_w,
-                avg(r.temperature_c) AS temperature_c
+                (array_agg(r.device_state ORDER BY r.time DESC))[1] AS device_state,
+                (array_agg(r.charger_error ORDER BY r.time DESC))[1] AS charger_error
             FROM readings r JOIN devices d ON d.id = r.device_id
             WHERE d.mac = $1 AND r.time > now() - make_interval(secs => $2)
             GROUP BY 1
@@ -108,24 +100,6 @@ async def get_readings_history(mac: str, hours: float = Query(default=6, gt=0, l
             mac, hours * 3600, _bucket_seconds(hours),
         )
         return [ReadingPoint(**dict(r)) for r in rows]
-
-
-@app.get("/api/raw-events/{mac}", response_model=list[RawEventPoint], dependencies=[Depends(require_token)])
-async def get_raw_events(mac: str, limit: int = Query(default=200, gt=0, le=2000)):
-    # Not downsampled - meant for spot-checking real payloads (e.g. while
-    # reverse-engineering decode.py), not for charting.
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT e.time, e.characteristic, e.hex, e.len
-            FROM raw_events e JOIN devices d ON d.id = e.device_id
-            WHERE d.mac = $1
-            ORDER BY e.time DESC LIMIT $2
-            """,
-            mac, limit,
-        )
-        return [RawEventPoint(**dict(r)) for r in rows]
 
 
 @app.get("/api/settings", dependencies=[Depends(require_token)])

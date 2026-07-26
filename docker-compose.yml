@@ -3,9 +3,9 @@ services:
     image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ecoworthy
+      POSTGRES_USER: victron
       POSTGRES_PASSWORD: changeme
-      POSTGRES_DB: ecoworthy
+      POSTGRES_DB: victron
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
@@ -18,23 +18,27 @@ services:
     depends_on:
       - timescaledb
     environment:
-      DATABASE_URL: postgresql://ecoworthy:changeme@timescaledb:5432/ecoworthy
+      DATABASE_URL: postgresql://victron:changeme@timescaledb:5432/victron
       API_TOKEN: changeme
-      # Host/port of the ESPHome device running the bluetooth_proxy
-      # component (see esphome-bluetooth-proxy/). The server connects
-      # out to it - the device never initiates anything back to us.
+      # Host/port of the ESPHome device running the victron_ble external
+      # component (see esphome-victron-ble/). It does its own BLE
+      # scanning/decryption on-device; the server connects out to it over
+      # the native API to subscribe to the already-decoded sensor values -
+      # the device never initiates anything back to us.
       ESPHOME_HOST: 192.168.2.4
       ESPHOME_PORT: "6053"
       ESPHOME_API_ENCRYPTION_KEY: changeme
-      # MAC address of the EcoWorthy BW0F to poll for.
-      TARGET_BLE_MAC: "e8:ca:50:42:16:c2"
-      # Everything below (ntfy + alert thresholds + BLE timing) is also
+      # MAC address of the Victron SmartSolar to poll for. Just a label
+      # here - the actual MAC/bindkey pairing that decrypts its BLE
+      # advertisements lives on the ESP32 (esphome-victron-ble/*.yaml).
+      TARGET_BLE_MAC: "aa:bb:cc:dd:ee:ff"
+      # Everything below (ntfy + alert thresholds + stall timing) is also
       # editable at runtime from the dashboard's Settings tab
       # (http://<host>:8080/settings) - these are just the defaults used
       # until something's overridden there. See app/settings.py.
       #
       # ntfy.sh push notifications for alert conditions (low voltage,
-      # low charge, high temp, BLE connection lost) - see app/alerts.py.
+      # charger error, ESP32/BLE connection lost) - see app/alerts.py.
       # Leave NTFY_TOPIC blank to disable alerting entirely. Use a hard
       # to guess topic name (or your own ntfy instance) since anyone who
       # knows the topic can read these notifications.
@@ -42,10 +46,10 @@ services:
       NTFY_TOPIC: ""
       NTFY_AUTH_TOKEN: ""
       # Leave blank to disable that specific check. "Low" depends on the
-      # pack's nominal voltage, so there's no sane default.
+      # pack's nominal voltage, so there's no sane default. The
+      # charger_error check is always on when ntfy is configured - no
+      # threshold needed for that one.
       ALERT_LOW_VOLTAGE_V: ""
-      ALERT_LOW_SOC_PCT: "20"
-      ALERT_HIGH_TEMP_C: "50"
       ALERT_COOLDOWN_SECONDS: "1800"
     volumes:
       # Read-only access to the migration files so app/migrate.py can

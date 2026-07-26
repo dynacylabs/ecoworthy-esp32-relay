@@ -6,28 +6,26 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # param, injected server-side into the dashboard HTML - see main.py).
 API_TOKEN = os.environ["API_TOKEN"]
 
-# The ESP32 running ESPHome's bluetooth_proxy. The server always initiates
-# this connection (native API, default port 6053) - the device never
-# reaches out on its own, which is what makes this work across the VLAN
-# separation between the hobocamp and wherever this server runs.
+# The ESP32 running the Fabian-Schmidt/esphome-victron_ble component (see
+# esphome-victron-ble/). It does its own BLE scanning/decryption on-device
+# and exposes the decoded values as plain ESPHome sensors; the server just
+# subscribes to those over the native API. The server always initiates
+# this connection (default port 6053) - the device never reaches out on
+# its own, which is what makes this work across the VLAN separation
+# between the hobocamp and wherever this server runs.
 ESPHOME_HOST = os.environ["ESPHOME_HOST"]
 ESPHOME_PORT = int(os.environ.get("ESPHOME_PORT", "6053"))
 ESPHOME_API_ENCRYPTION_KEY = os.environ["ESPHOME_API_ENCRYPTION_KEY"]
 
-# The BW0F's BLE MAC, confirmed live: e8:ca:50:42:16:c2. Server-side
-# config, not firmware - see README for why (any number of target devices
-# can be added here without ever touching the ESP32).
+# The Victron SmartSolar's BLE MAC. Purely a label used to tag stored
+# readings/alerts here - the actual BLE MAC/bindkey pairing that decrypts
+# its advertisements lives on the ESP32 (esphome-victron-ble/*.yaml),
+# since decoding happens there now, not on the server.
 TARGET_BLE_MAC = os.environ["TARGET_BLE_MAC"]
 
-# How long to wait for a BLE connection/service-discovery attempt before
-# giving up and retrying. The BW0F is usually quick once in range, but the
-# proxy's own connection setup can occasionally take a while over a
-# marginal link.
-BLE_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("BLE_CONNECT_TIMEOUT_SECONDS", "20"))
-
-# If nothing's been received from the device in this long while connected,
-# assume the connection is stale (silently dead, not properly
-# disconnected) and reconnect rather than waiting forever.
+# If no sensor update has arrived from the ESP32 in this long, assume the
+# SmartSolar is out of range/offline (or the ESP32 itself is unreachable)
+# and fire the offline alert rather than waiting forever.
 BLE_STALL_SECONDS = float(os.environ.get("BLE_STALL_SECONDS", "60"))
 
 # --- ntfy.sh push notifications (see app/alerts.py) --------------------
@@ -45,12 +43,12 @@ def _float_env(name: str) -> float | None:
     return float(value) if value else None
 
 
-# Alert thresholds. Each is optional - leave unset (blank/absent) to skip
-# that check entirely, since "low" depends on the battery pack's nominal
-# voltage (12V/24V/48V) which varies by installation.
+# Low battery voltage alert threshold. Optional - leave unset (blank/absent)
+# to skip that check entirely, since "low" depends on the battery pack's
+# nominal voltage (12V/24V/48V) which varies by installation. The
+# SmartSolar's charger_error text ("No error" vs anything else) is always
+# alerted on when ntfy is configured - no threshold needed for that one.
 ALERT_LOW_VOLTAGE_V = _float_env("ALERT_LOW_VOLTAGE_V")
-ALERT_LOW_SOC_PCT = _float_env("ALERT_LOW_SOC_PCT")
-ALERT_HIGH_TEMP_C = _float_env("ALERT_HIGH_TEMP_C")
 
 # Minimum time between repeat notifications for the same still-ongoing
 # alert, so one bad-but-persistent reading doesn't turn into a

@@ -1,0 +1,108 @@
+# ESP32-C3 running the Fabian-Schmidt/esphome-victron_ble external
+# component. This ESP32 is NOT a dumb relay: it passively listens for the
+# SmartSolar's encrypted BLE "Instant Readout" advertisements, decrypts
+# them on-device (AES-128-CTR, using `victron_bindkey` below), and
+# exposes the decoded values as plain ESPHome sensors/text_sensors over
+# the native API - see ../app/. The server (aioesphomeapi) just
+# subscribes to those sensor states; it does no BLE work of its own and
+# never connects to the SmartSolar directly.
+#
+# Deploy:
+#   pip install esphome
+#   cp secrets.yaml.example secrets.yaml   # fill in real values
+#   esphome run victron-mppt.yaml --device COM7           # first flash, over USB
+#   esphome run victron-mppt.yaml --device 192.168.2.5    # every flash after that, over OTA
+
+esphome:
+  name: victron-mppt
+  friendly_name: Victron MPPT
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Pulls in the victron_ble component - not part of core ESPHome (see
+# https://github.com/Fabian-Schmidt/esphome-victron_ble).
+external_components:
+  - source: github://Fabian-Schmidt/esphome-victron_ble
+
+# Native API only - no web_server, no human-facing anything. The server
+# (using aioesphomeapi) is the only intended client, and it always
+# initiates the connection to this device, never the other way around.
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # This network's SSID doesn't broadcast - fine, ESP32 associates
+  # directly by name regardless of whether it's broadcast.
+  fast_connect: true
+  manual_ip:
+    static_ip: !secret static_ip
+    gateway: !secret gateway
+    subnet: !secret subnet
+  # Confirmed this session on the custom-firmware build: modem sleep adds
+  # multi-second latency to inbound traffic even on a strong link, and
+  # separately, this chip's precompiled WiFi/BLE coexistence library
+  # crashed reproducibly when sleep was disabled right before BLE init on
+  # our own firmware. ESPHome may sequence things differently, but keep
+  # power_save_mode at its default (not explicitly disabled) here as a
+  # starting point and revisit only if this is actually a problem in
+  # practice.
+
+esp32_ble_tracker:
+
+# One entry per Victron device to listen for - just the one SmartSolar
+# for now, but more could be added here later (e.g. a SmartShunt) without
+# touching the server at all.
+victron_ble:
+  - id: smartsolar
+    mac_address: !secret victron_mac_address
+    bindkey: !secret victron_bindkey
+
+# Sensor/text_sensor names below are load-bearing: app/ble_poller.py
+# matches on the ESPHome-derived object_id (name, lowercased with spaces
+# turned into underscores) to know which field each value belongs to -
+# see NUMERIC_FIELDS/TEXT_FIELDS there. Keep these names in sync if
+# they're ever changed here.
+sensor:
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Battery Voltage"
+    type: BATTERY_VOLTAGE
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Battery Current"
+    type: BATTERY_CURRENT
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "PV Power"
+    type: PV_POWER
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Yield Today"
+    type: YIELD_TODAY
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Load Current"
+    type: LOAD_CURRENT
+
+text_sensor:
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Device State"
+    type: DEVICE_STATE
+  - platform: victron_ble
+    victron_ble_id: smartsolar
+    name: "Charger Error"
+    type: CHARGER_ERROR

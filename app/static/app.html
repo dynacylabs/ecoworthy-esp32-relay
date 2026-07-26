@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EcoWorthy Dashboard</title>
+<title>Victron Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -108,7 +108,7 @@
 <body>
 
 <div id="app">
-  <h1>EcoWorthy Dashboard</h1>
+  <h1>Victron Dashboard</h1>
 
   <div class="tabs">
     <a href="/dashboard" class="tab" data-tab="dashboard">Dashboard</a>
@@ -118,10 +118,10 @@
   <!-- ==================== Dashboard view ==================== -->
   <div id="view-dashboard" class="view">
     <div class="banner">
-      The BW0F's telemetry protocol isn't fully decoded yet - charts below
-      will be flat/empty until <code>decode.py</code> is filled in. The
-      "Raw Events" table at the bottom shows real captured payloads in the
-      meantime.
+      Data comes from the Victron SmartSolar's encrypted BLE "Instant
+      Readout" broadcast, decoded on the ESP32 itself (see
+      <code>esphome-victron-ble/</code>) and relayed here over the
+      ESPHome native API.
     </div>
 
     <h2>Live Status</h2>
@@ -138,25 +138,18 @@
     </div>
     <div class="charts">
       <div class="chart-box">
-        <div class="chart-help">Battery pack voltage, current, and state of charge.</div>
+        <div class="chart-help">Battery voltage and charging current.</div>
         <canvas id="chart-battery"></canvas>
       </div>
       <div class="chart-box">
-        <div class="chart-help">Solar (PV) input: voltage, current, and power.</div>
-        <canvas id="chart-pv"></canvas>
+        <div class="chart-help">Solar (PV) power output and cumulative yield for the day.</div>
+        <canvas id="chart-solar"></canvas>
       </div>
       <div class="chart-box">
-        <div class="chart-help">Load output: voltage, current, and power.</div>
+        <div class="chart-help">Load output current, if the model has a load terminal.</div>
         <canvas id="chart-load"></canvas>
       </div>
-      <div class="chart-box">
-        <div class="chart-help">Device temperature, if reported.</div>
-        <canvas id="chart-temp"></canvas>
-      </div>
     </div>
-
-    <h2>Raw Events</h2>
-    <div class="table-scroll" id="raw-events"></div>
   </div>
 
   <!-- ==================== Settings view ==================== -->
@@ -266,11 +259,12 @@ async function refreshStatus() {
       </div>
       <div class="kv">
         <div class="k">Last seen</div><div class="v">${timeAgo(d.last_seen)}</div>
-        <div class="k">Events (5m)</div><div class="v">${d.events_last_5min}</div>
         <div class="k">Battery</div><div class="v">${fmt(r.battery_voltage_v, " V")} / ${fmt(r.battery_current_a, " A")}</div>
-        <div class="k">SOC</div><div class="v">${fmt(r.battery_soc_pct, " %", 0)}</div>
-        <div class="k">PV in</div><div class="v">${fmt(r.pv_voltage_v, " V")} / ${fmt(r.pv_current_a, " A")}</div>
-        <div class="k">Load out</div><div class="v">${fmt(r.load_voltage_v, " V")} / ${fmt(r.load_current_a, " A")}</div>
+        <div class="k">PV power</div><div class="v">${fmt(r.pv_power_w, " W", 0)}</div>
+        <div class="k">Yield today</div><div class="v">${fmt(r.yield_today_kwh, " kWh")}</div>
+        <div class="k">Load current</div><div class="v">${fmt(r.load_current_a, " A")}</div>
+        <div class="k">State</div><div class="v">${r.device_state ?? "—"}</div>
+        <div class="k">Charger error</div><div class="v">${r.charger_error ?? "—"}</div>
       </div>
     `;
     container.appendChild(card);
@@ -303,10 +297,9 @@ function chartOpts(yLabel) {
 }
 
 function initCharts() {
-  charts.battery = new Chart(document.getElementById("chart-battery"), chartOpts("V / A / %"));
-  charts.pv = new Chart(document.getElementById("chart-pv"), chartOpts("V / A / W"));
-  charts.load = new Chart(document.getElementById("chart-load"), chartOpts("V / A / W"));
-  charts.temp = new Chart(document.getElementById("chart-temp"), chartOpts("°C"));
+  charts.battery = new Chart(document.getElementById("chart-battery"), chartOpts("V / A"));
+  charts.solar = new Chart(document.getElementById("chart-solar"), chartOpts("W / kWh"));
+  charts.load = new Chart(document.getElementById("chart-load"), chartOpts("A"));
 
   document.getElementById("range-picker").addEventListener("click", (e) => {
     if (e.target.tagName !== "BUTTON") return;
@@ -326,66 +319,27 @@ async function refreshCharts() {
       data: series.map(p => ({ x: p.time, y: p.battery_voltage_v })) },
     { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
       data: series.map(p => ({ x: p.time, y: p.battery_current_a })) },
-    { label: "SOC (%)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2, borderDash: [4, 4],
-      data: series.map(p => ({ x: p.time, y: p.battery_soc_pct })) },
   ];
   charts.battery.update();
 
-  charts.pv.data.datasets = [
-    { label: "Voltage (V)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.pv_voltage_v })) },
-    { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.pv_current_a })) },
-    { label: "Power (W)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2,
+  charts.solar.data.datasets = [
+    { label: "PV Power (W)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2,
       data: series.map(p => ({ x: p.time, y: p.pv_power_w })) },
+    { label: "Yield Today (kWh)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2, borderDash: [4, 4],
+      data: series.map(p => ({ x: p.time, y: p.yield_today_kwh })) },
   ];
-  charts.pv.update();
+  charts.solar.update();
 
   charts.load.data.datasets = [
-    { label: "Voltage (V)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.load_voltage_v })) },
-    { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
+    { label: "Load Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
       data: series.map(p => ({ x: p.time, y: p.load_current_a })) },
-    { label: "Power (W)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.load_power_w })) },
   ];
   charts.load.update();
-
-  charts.temp.data.datasets = [
-    { label: "Temperature (°C)", borderColor: "#f85149", backgroundColor: "#f85149", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.temperature_c })) },
-  ];
-  charts.temp.update();
-}
-
-async function refreshRawEvents() {
-  const resp = await api(`/api/raw-events/${encodeURIComponent(TARGET_MAC)}?limit=50`);
-  const events = resp.ok ? await resp.json() : [];
-  const container = document.getElementById("raw-events");
-  if (events.length === 0) {
-    container.innerHTML = '<div class="empty">No raw events captured yet.</div>';
-    return;
-  }
-  const rows = events.map(e => `
-    <tr>
-      <td>${new Date(e.time).toLocaleTimeString()}</td>
-      <td><code>${e.characteristic}</code></td>
-      <td>${e.len}</td>
-      <td><code>${e.hex}</code></td>
-    </tr>
-  `).join("");
-  container.innerHTML = `
-    <table>
-      <thead><tr><th>Time</th><th>Characteristic</th><th>Len</th><th>Hex</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
 }
 
 function refreshDashboard() {
   refreshStatus();
   refreshCharts();
-  refreshRawEvents();
 }
 
 // ==================== Settings view logic ====================
@@ -501,7 +455,6 @@ refreshDashboard();
 loadSettings();
 loadEnvironment();
 setInterval(refreshStatus, 15000);
-setInterval(refreshRawEvents, 15000);
 setInterval(refreshCharts, 30000);
 
 showTab(location.pathname.includes("settings") ? "settings" : "dashboard", { pushState: false });

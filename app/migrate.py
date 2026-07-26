@@ -21,7 +21,7 @@ from pathlib import Path
 
 import asyncpg
 
-logger = logging.getLogger("ecoworthy.migrate")
+logger = logging.getLogger("victron.migrate")
 
 MIGRATIONS_DIR = Path(os.environ.get("MIGRATIONS_DIR", "db/migrations"))
 

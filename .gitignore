@@ -1,5 +1,5 @@
-esphome-bluetooth-proxy/secrets.yaml
-esphome-bluetooth-proxy/.esphome/
+esphome-victron-ble/secrets.yaml
+esphome-victron-ble/.esphome/
 .env
 docker-compose.override.yml
 __pycache__/

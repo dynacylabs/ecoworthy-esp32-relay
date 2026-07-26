@@ -4,7 +4,7 @@ import asyncpg
 
 from config import DATABASE_URL
 
-logger = logging.getLogger("ecoworthy.db")
+logger = logging.getLogger("victron.db")
 
 _pool: asyncpg.Pool | None = None
 
