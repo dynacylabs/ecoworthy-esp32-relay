@@ -2,7 +2,7 @@
 # BLE parsing at all. All "brains" (connect to a device, discover its GATT
 # services/characteristics, subscribe to notify, read raw bytes) live in a
 # custom server using aioesphomeapi to talk to this device's native API -
-# see ../server/. This device just relays.
+# see ../app/. This device just relays.
 #
 # Deploy:
 #   pip install esphome

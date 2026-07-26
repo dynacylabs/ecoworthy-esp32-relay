@@ -1,6 +1,6 @@
 # Field ESP32-C3 at the hobocamp, running as a pure ESPHome Bluetooth
 # Proxy - same role as bench.yaml, just the actual deployed unit next to
-# the real EcoWorthy BW0F. No on-device BLE parsing; see ../server/.
+# the real EcoWorthy BW0F. No on-device BLE parsing; see ../app/.
 #
 # The initial flash MUST be done over USB (this device is not currently
 # running ESPHome - it's on the old hand-rolled Arduino/PlatformIO
