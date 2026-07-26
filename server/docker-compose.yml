@@ -28,6 +28,31 @@ services:
       ESPHOME_API_ENCRYPTION_KEY: changeme
       # MAC address of the EcoWorthy BW0F to poll for.
       TARGET_BLE_MAC: "e8:ca:50:42:16:c2"
+      # Everything below (ntfy + alert thresholds + BLE timing) is also
+      # editable at runtime from the dashboard's Settings tab
+      # (http://<host>:8080/settings) - these are just the defaults used
+      # until something's overridden there. See app/settings.py.
+      #
+      # ntfy.sh push notifications for alert conditions (low voltage,
+      # low charge, high temp, BLE connection lost) - see app/alerts.py.
+      # Leave NTFY_TOPIC blank to disable alerting entirely. Use a hard
+      # to guess topic name (or your own ntfy instance) since anyone who
+      # knows the topic can read these notifications.
+      NTFY_URL: https://ntfy.sh
+      NTFY_TOPIC: ""
+      NTFY_AUTH_TOKEN: ""
+      # Leave blank to disable that specific check. "Low" depends on the
+      # pack's nominal voltage, so there's no sane default.
+      ALERT_LOW_VOLTAGE_V: ""
+      ALERT_LOW_SOC_PCT: "20"
+      ALERT_HIGH_TEMP_C: "50"
+      ALERT_COOLDOWN_SECONDS: "1800"
+    volumes:
+      # Read-only access to the migration files so app/migrate.py can
+      # apply any not-yet-applied one on startup (see its module
+      # docstring) - keeps upgrades to a container restart, no manual
+      # `psql` step needed.
+      - ./db/migrations:/app/db/migrations:ro
     ports:
       - "8080:8080"
     networks:

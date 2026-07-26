@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EcoWorthy Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  /* Theme matches dynacylabs/heltec-wifi-optimization - separate project,
+     shared look. */
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 20px; }
+  h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 32px 0 12px; }
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 260px; flex: 1;
+  }
+  .card-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; margin-bottom: 12px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.offline { background: var(--red); }
+  .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv div.k { color: var(--muted); }
+  .kv div.v { text-align: right; font-variant-numeric: tabular-nums; }
+  .charts { display: flex; flex-direction: column; gap: 28px; }
+  .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; height: 340px; display: flex; flex-direction: column; }
+  .chart-help { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.4; }
+  .chart-box canvas { flex: 1; min-height: 0; }
+  .range-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .range-picker button {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .range-picker button.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); word-break: break-all; }
+  tr:last-child td { border-bottom: none; }
+  code { background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+  .banner {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 18px; margin-bottom: 20px; font-size: 13px; color: var(--muted);
+  }
+  .table-scroll { overflow-x: auto; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tab { color: var(--muted); text-decoration: none; padding: 10px 16px; font-size: 14px; border-bottom: 2px solid transparent; background: none; cursor: pointer; font-family: inherit; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  .view.hidden { display: none; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px 24px; margin-bottom: 24px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .field:last-child { border-bottom: none; }
+  .field-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+  .field-label { font-size: 14px; font-weight: 600; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; color: var(--muted); border: 1px solid var(--border); }
+  .badge.custom { color: var(--accent); border-color: var(--accent); }
+  .field-help { font-size: 12px; color: var(--muted); line-height: 1.4; }
+  input[type="text"], input[type="number"], input[type="password"] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 6px; font-size: 13px; width: 100%; max-width: 420px;
+    font-variant-numeric: tabular-nums;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #0d1117; border: none;
+    padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); font-weight: 500; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+  .status-msg { font-size: 13px; }
+  .status-msg.ok { color: var(--green); }
+  .status-msg.err { color: var(--red); }
+  .kv-grid { display: grid; grid-template-columns: 200px 1fr; gap: 8px 12px; font-size: 13px; }
+  .kv-grid div.k { color: var(--muted); }
+  @media (max-width: 480px) {
+    body { padding: 14px; }
+    .kv-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <h1>EcoWorthy Dashboard</h1>
+
+  <div class="tabs">
+    <a href="/dashboard" class="tab" data-tab="dashboard">Dashboard</a>
+    <a href="/settings" class="tab" data-tab="settings">Settings</a>
+  </div>
+
+  <!-- ==================== Dashboard view ==================== -->
+  <div id="view-dashboard" class="view">
+    <div class="banner">
+      The BW0F's telemetry protocol isn't fully decoded yet - charts below
+      will be flat/empty until <code>decode.py</code> is filled in. The
+      "Raw Events" table at the bottom shows real captured payloads in the
+      meantime.
+    </div>
+
+    <h2>Live Status</h2>
+    <div class="cards" id="status-cards"></div>
+
+    <h2>History</h2>
+    <div class="range-picker" id="range-picker">
+      <button data-hours="1">1h</button>
+      <button data-hours="6" class="active">6h</button>
+      <button data-hours="24">1d</button>
+      <button data-hours="168">7d</button>
+      <button data-hours="720">30d</button>
+      <button data-hours="2160">90d</button>
+    </div>
+    <div class="charts">
+      <div class="chart-box">
+        <div class="chart-help">Battery pack voltage, current, and state of charge.</div>
+        <canvas id="chart-battery"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-help">Solar (PV) input: voltage, current, and power.</div>
+        <canvas id="chart-pv"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-help">Load output: voltage, current, and power.</div>
+        <canvas id="chart-load"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-help">Device temperature, if reported.</div>
+        <canvas id="chart-temp"></canvas>
+      </div>
+    </div>
+
+    <h2>Raw Events</h2>
+    <div class="table-scroll" id="raw-events"></div>
+  </div>
+
+  <!-- ==================== Settings view ==================== -->
+  <div id="view-settings" class="view hidden">
+    <div class="banner">
+      Changes here take effect immediately - no restart needed. Leave a
+      field blank to fall back to its environment-variable default (shown
+      as a placeholder).
+    </div>
+
+    <h2>Device / BLE</h2>
+    <div class="panel" id="group-device"></div>
+
+    <h2>Alerts (ntfy)</h2>
+    <div class="panel" id="group-alerts"></div>
+
+    <div class="actions">
+      <button id="save-btn">Save changes</button>
+      <button id="test-btn" class="secondary">Send test notification</button>
+      <span class="status-msg" id="status-msg"></span>
+    </div>
+
+    <h2>Environment (read-only)</h2>
+    <div class="panel">
+      <div class="kv-grid" id="env-kv"></div>
+      <div class="field-help" style="margin-top: 12px;">
+        These are set via the server's environment (<code>docker-compose.yml</code>)
+        and require a container restart to change - not exposed here since
+        getting them wrong can break connectivity or lock out the dashboard.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN = __API_TOKEN__;
+const TARGET_MAC = __TARGET_MAC__;
+
+function api(path, options = {}) {
+  const sep = path.includes("?") ? "&" : "?";
+  return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`, options);
+}
+
+// ==================== Tab switching (no full page reload) ====================
+// Both /dashboard and /settings are served by the same page - clicking a
+// tab just toggles which view is visible and updates the URL via
+// history.pushState, rather than triggering a real navigation.
+
+function showTab(tab, { pushState = true } = {}) {
+  document.getElementById("view-dashboard").classList.toggle("hidden", tab !== "dashboard");
+  document.getElementById("view-settings").classList.toggle("hidden", tab !== "settings");
+  document.querySelectorAll(".tab").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
+  if (pushState) {
+    history.pushState({ tab }, "", tab === "settings" ? "/settings" : "/dashboard");
+  }
+}
+
+document.querySelectorAll(".tab").forEach(a => {
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    showTab(a.dataset.tab);
+  });
+});
+
+window.addEventListener("popstate", (e) => {
+  const tab = e.state?.tab || (location.pathname.includes("settings") ? "settings" : "dashboard");
+  showTab(tab, { pushState: false });
+});
+
+// ==================== Dashboard view logic ====================
+
+let selectedHours = 6;
+let charts = {};
+
+function fmt(v, unit = "", digits = 2) {
+  return (v === null || v === undefined) ? "—" : `${Number(v).toFixed(digits)}${unit}`;
+}
+
+function timeAgo(iso) {
+  if (!iso) return "never";
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+async function refreshStatus() {
+  const resp = await api("/api/status");
+  if (!resp.ok) return;
+  const devices = await resp.json();
+  const container = document.getElementById("status-cards");
+  container.innerHTML = "";
+  if (devices.length === 0) {
+    container.innerHTML = '<div class="empty">No devices seen yet - waiting on the BLE poller to connect.</div>';
+    return;
+  }
+  for (const d of devices) {
+    const online = d.last_seen && (Date.now() - new Date(d.last_seen).getTime()) < 120000;
+    const r = d.latest || {};
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-title">
+        <span class="dot ${online ? "online" : "offline"}"></span>
+        ${d.name || d.mac}
+      </div>
+      <div class="kv">
+        <div class="k">Last seen</div><div class="v">${timeAgo(d.last_seen)}</div>
+        <div class="k">Events (5m)</div><div class="v">${d.events_last_5min}</div>
+        <div class="k">Battery</div><div class="v">${fmt(r.battery_voltage_v, " V")} / ${fmt(r.battery_current_a, " A")}</div>
+        <div class="k">SOC</div><div class="v">${fmt(r.battery_soc_pct, " %", 0)}</div>
+        <div class="k">PV in</div><div class="v">${fmt(r.pv_voltage_v, " V")} / ${fmt(r.pv_current_a, " A")}</div>
+        <div class="k">Load out</div><div class="v">${fmt(r.load_voltage_v, " V")} / ${fmt(r.load_current_a, " A")}</div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function chartOpts(yLabel) {
+  return {
+    type: "line",
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: {
+          type: "time",
+          ticks: { color: "#8b949e", autoSkip: true, maxTicksLimit: 8, maxRotation: 0 },
+          grid: { color: "#30363d" },
+        },
+        y: { title: { display: true, text: yLabel, color: "#8b949e" }, ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
+      },
+      plugins: {
+        legend: { labels: { color: "#c9d1d9" } },
+        tooltip: { mode: "index", intersect: false },
+      },
+      interaction: { mode: "index", intersect: false },
+    },
+  };
+}
+
+function initCharts() {
+  charts.battery = new Chart(document.getElementById("chart-battery"), chartOpts("V / A / %"));
+  charts.pv = new Chart(document.getElementById("chart-pv"), chartOpts("V / A / W"));
+  charts.load = new Chart(document.getElementById("chart-load"), chartOpts("V / A / W"));
+  charts.temp = new Chart(document.getElementById("chart-temp"), chartOpts("°C"));
+
+  document.getElementById("range-picker").addEventListener("click", (e) => {
+    if (e.target.tagName !== "BUTTON") return;
+    document.querySelectorAll("#range-picker button").forEach(b => b.classList.remove("active"));
+    e.target.classList.add("active");
+    selectedHours = parseFloat(e.target.dataset.hours);
+    refreshCharts();
+  });
+}
+
+async function refreshCharts() {
+  const resp = await api(`/api/readings/${encodeURIComponent(TARGET_MAC)}?hours=${selectedHours}`);
+  const series = resp.ok ? await resp.json() : [];
+
+  charts.battery.data.datasets = [
+    { label: "Voltage (V)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.battery_voltage_v })) },
+    { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.battery_current_a })) },
+    { label: "SOC (%)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2, borderDash: [4, 4],
+      data: series.map(p => ({ x: p.time, y: p.battery_soc_pct })) },
+  ];
+  charts.battery.update();
+
+  charts.pv.data.datasets = [
+    { label: "Voltage (V)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.pv_voltage_v })) },
+    { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.pv_current_a })) },
+    { label: "Power (W)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.pv_power_w })) },
+  ];
+  charts.pv.update();
+
+  charts.load.data.datasets = [
+    { label: "Voltage (V)", borderColor: "#58a6ff", backgroundColor: "#58a6ff", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.load_voltage_v })) },
+    { label: "Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.load_current_a })) },
+    { label: "Power (W)", borderColor: "#d29922", backgroundColor: "#d29922", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.load_power_w })) },
+  ];
+  charts.load.update();
+
+  charts.temp.data.datasets = [
+    { label: "Temperature (°C)", borderColor: "#f85149", backgroundColor: "#f85149", pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.temperature_c })) },
+  ];
+  charts.temp.update();
+}
+
+async function refreshRawEvents() {
+  const resp = await api(`/api/raw-events/${encodeURIComponent(TARGET_MAC)}?limit=50`);
+  const events = resp.ok ? await resp.json() : [];
+  const container = document.getElementById("raw-events");
+  if (events.length === 0) {
+    container.innerHTML = '<div class="empty">No raw events captured yet.</div>';
+    return;
+  }
+  const rows = events.map(e => `
+    <tr>
+      <td>${new Date(e.time).toLocaleTimeString()}</td>
+      <td><code>${e.characteristic}</code></td>
+      <td>${e.len}</td>
+      <td><code>${e.hex}</code></td>
+    </tr>
+  `).join("");
+  container.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Characteristic</th><th>Len</th><th>Hex</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function refreshDashboard() {
+  refreshStatus();
+  refreshCharts();
+  refreshRawEvents();
+}
+
+// ==================== Settings view logic ====================
+
+let settingsFields = [];
+
+function fieldInputId(key) {
+  return `field-${key}`;
+}
+
+function renderGroup(containerId, groupFields) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = groupFields.map(f => {
+    const inputType = f.secret ? "password" : (f.type === "float" ? "number" : "text");
+    const placeholder = (f.env_default === null || f.env_default === undefined || f.env_default === "")
+      ? "(none - blank disables this check)"
+      : `${f.env_default}`;
+    const currentValue = f.is_override ? f.value : "";
+    return `
+      <div class="field">
+        <div class="field-head">
+          <span class="field-label">${f.label}</span>
+          <span class="badge ${f.is_override ? "custom" : ""}">${f.is_override ? "custom" : "using default"}</span>
+        </div>
+        <div class="field-help">${f.help}</div>
+        <input
+          type="${inputType}"
+          id="${fieldInputId(f.key)}"
+          data-key="${f.key}"
+          ${f.type === "float" ? 'step="any"' : ""}
+          placeholder="${placeholder}"
+          value="${currentValue === null || currentValue === undefined ? "" : currentValue}"
+          autocomplete="off"
+        />
+      </div>
+    `;
+  }).join("");
+}
+
+async function loadSettings() {
+  const resp = await api("/api/settings");
+  if (!resp.ok) return;
+  settingsFields = await resp.json();
+  renderGroup("group-device", settingsFields.filter(f => f.group === "device"));
+  renderGroup("group-alerts", settingsFields.filter(f => f.group === "alerts"));
+}
+
+async function loadEnvironment() {
+  const resp = await api("/api/environment");
+  if (!resp.ok) return;
+  const env = await resp.json();
+  document.getElementById("env-kv").innerHTML = `
+    <div class="k">ESPHome host</div><div>${env.esphome_host}</div>
+    <div class="k">ESPHome port</div><div>${env.esphome_port}</div>
+    <div class="k">ESPHome encryption key</div><div>${env.esphome_key_set ? "configured" : "not set"}</div>
+    <div class="k">Dashboard API token</div><div>${env.api_token_set ? "configured" : "not set"}</div>
+  `;
+}
+
+function setStatus(message, ok) {
+  const el = document.getElementById("status-msg");
+  el.textContent = message;
+  el.className = `status-msg ${ok ? "ok" : "err"}`;
+  if (message) setTimeout(() => { el.textContent = ""; }, 4000);
+}
+
+async function saveSettings() {
+  const updates = {};
+  for (const f of settingsFields) {
+    const input = document.getElementById(fieldInputId(f.key));
+    if (!input) continue;
+    updates[f.key] = input.value;
+  }
+  const resp = await api("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (resp.ok) {
+    settingsFields = await resp.json();
+    renderGroup("group-device", settingsFields.filter(f => f.group === "device"));
+    renderGroup("group-alerts", settingsFields.filter(f => f.group === "alerts"));
+    setStatus("Saved.", true);
+  } else {
+    const body = await resp.json().catch(() => ({}));
+    setStatus(body.detail || "Failed to save settings.", false);
+  }
+}
+
+async function sendTestNotification() {
+  const btn = document.getElementById("test-btn");
+  btn.disabled = true;
+  try {
+    const resp = await api("/api/settings/test-notification", { method: "POST" });
+    if (resp.ok) {
+      setStatus("Test notification sent - check your ntfy app.", true);
+    } else {
+      const body = await resp.json().catch(() => ({}));
+      setStatus(body.detail || "Failed to send test notification.", false);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("save-btn").addEventListener("click", saveSettings);
+document.getElementById("test-btn").addEventListener("click", sendTestNotification);
+
+// ==================== Boot ====================
+
+initCharts();
+refreshDashboard();
+loadSettings();
+loadEnvironment();
+setInterval(refreshStatus, 15000);
+setInterval(refreshRawEvents, 15000);
+setInterval(refreshCharts, 30000);
+
+showTab(location.pathname.includes("settings") ? "settings" : "dashboard", { pushState: false });
+</script>
+
+</body>
+</html>

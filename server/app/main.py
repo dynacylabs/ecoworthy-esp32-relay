@@ -6,9 +6,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+import alerts
+import settings
 from ble_poller import BLEPoller
-from config import API_TOKEN, TARGET_BLE_MAC
+from config import API_TOKEN, ESPHOME_API_ENCRYPTION_KEY, ESPHOME_HOST, ESPHOME_PORT
 from db import close_pool, get_pool
+from migrate import run as run_migrations
 from models import DeviceStatus, RawEventPoint, ReadingPoint
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +22,9 @@ poller = BLEPoller()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await get_pool()
+    pool = await get_pool()
+    await run_migrations(pool)
+    await settings.load(pool)
     poller_task = asyncio.create_task(poller.run_forever())
     yield
     await poller.stop()
@@ -123,22 +128,73 @@ async def get_raw_events(mac: str, limit: int = Query(default=200, gt=0, le=2000
         return [RawEventPoint(**dict(r)) for r in rows]
 
 
+@app.get("/api/settings", dependencies=[Depends(require_token)])
+async def get_settings():
+    pool = await get_pool()
+    return await settings.describe(pool)
+
+
+@app.post("/api/settings", dependencies=[Depends(require_token)])
+async def update_settings(updates: dict[str, str | float | None]):
+    pool = await get_pool()
+    try:
+        await settings.save(pool, updates)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid setting value: {exc}")
+    return await settings.describe(pool)
+
+
+@app.post("/api/settings/test-notification", dependencies=[Depends(require_token)])
+async def send_test_notification():
+    sent = await alerts.send_test_notification()
+    if not sent:
+        raise HTTPException(400, "ntfy_topic is not set - nothing to test")
+    return {"status": "sent"}
+
+
+@app.get("/api/environment", dependencies=[Depends(require_token)])
+async def get_environment():
+    # Real infrastructure config - env-var-only (see settings.py's module
+    # docstring for why), shown read-only for transparency. Never returns
+    # actual secret values, only whether they're set.
+    return {
+        "esphome_host": ESPHOME_HOST,
+        "esphome_port": ESPHOME_PORT,
+        "esphome_key_set": bool(ESPHOME_API_ENCRYPTION_KEY),
+        "api_token_set": bool(API_TOKEN),
+    }
+
+
 @app.get("/")
 async def root():
     return RedirectResponse("/dashboard")
 
 
-@app.get("/dashboard")
-async def dashboard_page():
+def _render_app_page() -> HTMLResponse:
     # Token injected server-side, same pattern as heltec-wifi-optimization -
     # access control for a human is expected to happen in front of this
     # (reverse proxy), not here. The token stays required on the API routes
     # regardless, as defense in depth.
-    with open("static/dashboard.html", encoding="utf-8") as f:
+    #
+    # /dashboard and /settings both serve this same page - it's a single
+    # HTML document with both views built in, and switches between them
+    # client-side (see app.html's showTab()) instead of doing a full page
+    # navigation on every tab click.
+    with open("static/app.html", encoding="utf-8") as f:
         html = f.read()
     html = html.replace("__API_TOKEN__", json.dumps(API_TOKEN))
-    html = html.replace("__TARGET_MAC__", json.dumps(TARGET_BLE_MAC))
+    html = html.replace("__TARGET_MAC__", json.dumps(settings.current()["target_ble_mac"]))
     return HTMLResponse(html)
+
+
+@app.get("/dashboard")
+async def dashboard_page():
+    return _render_app_page()
+
+
+@app.get("/settings")
+async def settings_page():
+    return _render_app_page()
 
 
 @app.get("/health")

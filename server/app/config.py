@@ -29,3 +29,30 @@ BLE_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("BLE_CONNECT_TIMEOUT_SECONDS"
 # assume the connection is stale (silently dead, not properly
 # disconnected) and reconnect rather than waiting forever.
 BLE_STALL_SECONDS = float(os.environ.get("BLE_STALL_SECONDS", "60"))
+
+# --- ntfy.sh push notifications (see app/alerts.py) --------------------
+#
+# Alerting is disabled entirely unless NTFY_TOPIC is set. Point NTFY_URL
+# at self-hosted ntfy instead of ntfy.sh if you're running your own, and
+# set NTFY_AUTH_TOKEN if that topic requires auth.
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
+NTFY_AUTH_TOKEN = os.environ.get("NTFY_AUTH_TOKEN", "")
+
+
+def _float_env(name: str) -> float | None:
+    value = os.environ.get(name)
+    return float(value) if value else None
+
+
+# Alert thresholds. Each is optional - leave unset (blank/absent) to skip
+# that check entirely, since "low" depends on the battery pack's nominal
+# voltage (12V/24V/48V) which varies by installation.
+ALERT_LOW_VOLTAGE_V = _float_env("ALERT_LOW_VOLTAGE_V")
+ALERT_LOW_SOC_PCT = _float_env("ALERT_LOW_SOC_PCT")
+ALERT_HIGH_TEMP_C = _float_env("ALERT_HIGH_TEMP_C")
+
+# Minimum time between repeat notifications for the same still-ongoing
+# alert, so one bad-but-persistent reading doesn't turn into a
+# notification storm (readings can arrive every second or so).
+ALERT_COOLDOWN_SECONDS = float(os.environ.get("ALERT_COOLDOWN_SECONDS", "1800"))
