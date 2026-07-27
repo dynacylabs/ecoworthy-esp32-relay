@@ -36,8 +36,9 @@ land upstream in `esphome-victron_ble`, not in this repo.
   project) with charts for battery/solar/load state.
 - [db/migrations/](db/migrations/001_init.sql): TimescaleDB schema,
   applied automatically on startup (see `app/migrate.py`).
-- [docker-compose.yml](docker-compose.yml): runs the `app` and
-  `timescaledb` services - see "Running" below.
+- [docker-compose.yml](docker-compose.yml): runs the `app`, `timescaledb`,
+  `esphome` (dashboard), and `firmware-proxy` services - see "Running"
+  below.
 
 ## Layout
 
@@ -81,11 +82,59 @@ land upstream in `esphome-victron_ble`, not in this repo.
 2. Copy `esphome-victron-ble/secrets.yaml.example` to
    `esphome-victron-ble/secrets.yaml` and fill in WiFi/API/OTA secrets
    plus `victron_mac_address`/`victron_bindkey`.
-3. Flash `victron-mppt.yaml` with `esphome run` (first flash over USB,
-   every flash after that over OTA). It declares
+3. Flash `victron-mppt.yaml` with `esphome run` (first flash over USB
+   only - it has to be reachable on the network before OTA is possible).
+   It declares
    `external_components: source: github://Fabian-Schmidt/esphome-victron_ble`,
    so ESPHome pulls the component automatically at build time - no local
    checkout needed.
+
+Every flash after that first one - new firmware, WiFi/API/OTA credential
+changes, or a different Victron MAC/bindkey - can be done over the air
+from the dashboard's **Firmware** tab instead of the command line; see
+"Firmware updates" below.
+
+## Firmware updates (web UI)
+
+The **Firmware** tab (`/firmware`) embeds a full ESPHome
+dashboard/device builder in an iframe, running as its own container (the
+`esphome` service in `docker-compose.yml`, image `esphome/esphome`)
+pointed at `esphome-victron-ble/`. Rather than reimplementing ESPHome's
+build/OTA pipeline in this app, it just reuses the real thing:
+
+- Edit `victron-mppt.yaml`/`secrets.yaml` (WiFi, API encryption key, OTA
+  password, and the SmartSolar's `victron_mac_address`/`victron_bindkey`)
+  from a web form.
+- Compile and OTA-install straight to the ESP32, with live build logs in
+  the browser.
+- Works over the same network path the main app already uses to reach
+  `ESPHOME_HOST` - no extra network access needed.
+
+The iframe doesn't point at the `esphome` service directly - it goes
+through `firmware-proxy` (see `firmware-proxy/nginx.conf`), a small nginx
+sidecar that sits in front of it purely so the embedded dashboard can be
+dark-themed to match this app, without touching the `esphome/esphome`
+image itself. It reverse-proxies every request (including the WebSocket
+used for live build logs) and injects a small `<style>`/`<script>` into
+the HTML that:
+
+- points the device builder's own theme tokens (`--primary-color` and
+  friends - it already exposes these for embedding, e.g. in Home
+  Assistant) at this app's palette, and
+- forces its dark theme regardless of the browser/OS's actual
+  color-scheme preference.
+
+That also means `esphome`'s own Content-Security-Policy is dropped for
+the proxied copy (it disallows inline `<style>`/`<script>`, which is how
+the override above is applied) - the dashboard's own login is unaffected
+and still required. `esphome` itself isn't published on the host at all;
+only `firmware-proxy` is (see `ESPHOME_DASHBOARD_PORT` below).
+
+It has its own login (`ESPHOME_USERNAME`/`ESPHOME_PASSWORD` in
+`docker-compose.yml` - **change these from the defaults**), separate from
+this dashboard's `API_TOKEN`, and is published on its own port
+(`6052` by default, via `firmware-proxy`). The first-ever flash of a
+blank ESP32 still needs a USB cable - see "ESPHome setup" above.
 
 ## Running
 
@@ -110,10 +159,13 @@ Before starting, edit the `app` service's environment in
 - `TARGET_BLE_MAC` - the SmartSolar's BLE MAC (label only - see
   "ESPHome setup" above for where the actual decode key lives); can also
   be changed later from the Settings tab.
+- `ESPHOME_USERNAME` / `ESPHOME_PASSWORD` - login for the `esphome`
+  service's dashboard (embedded in the app's Firmware tab) - pick real
+  credentials.
 
 Then open `http://<host>:8080/` (redirects to `/dashboard`, token is
 injected server-side). Use the tabs at the top to switch between the
-dashboard and Settings.
+dashboard, Settings, and Firmware.
 
 > **Note:** this project's schema changed completely when it moved from
 > an earlier EcoWorthy prototype to Victron support. If you have an

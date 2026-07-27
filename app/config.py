@@ -17,6 +17,13 @@ ESPHOME_HOST = os.environ["ESPHOME_HOST"]
 ESPHOME_PORT = int(os.environ.get("ESPHOME_PORT", "6053"))
 ESPHOME_API_ENCRYPTION_KEY = os.environ["ESPHOME_API_ENCRYPTION_KEY"]
 
+# Port of the separate ESPHome dashboard/device builder container (see the
+# `esphome` service in docker-compose.yml) - used only to build the
+# "Open ESPHome Dashboard" link on this app's Firmware tab. That's where
+# firmware/WiFi/MAC/bindkey updates actually happen; this app has no
+# build/flash code of its own.
+ESPHOME_DASHBOARD_PORT = os.environ.get("ESPHOME_DASHBOARD_PORT", "6052")
+
 # The Victron SmartSolar's BLE MAC. Purely a label used to tag stored
 # readings/alerts here - the actual BLE MAC/bindkey pairing that decrypts
 # its advertisements lives on the ESP32 (esphome-victron-ble/*.yaml),

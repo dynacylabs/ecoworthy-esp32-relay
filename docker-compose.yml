@@ -51,6 +51,10 @@ services:
       # threshold needed for that one.
       ALERT_LOW_VOLTAGE_V: ""
       ALERT_COOLDOWN_SECONDS: "1800"
+      # Port the ESPHome dashboard (below) is published on. Only used to
+      # build the "Open ESPHome Dashboard" link on this app's Firmware tab -
+      # change it if you remap that service's port below.
+      ESPHOME_DASHBOARD_PORT: "6052"
     volumes:
       # Read-only access to the migration files so app/migrate.py can
       # apply any not-yet-applied one on startup (see its module
@@ -59,6 +63,44 @@ services:
       - ./db/migrations:/app/db/migrations:ro
     ports:
       - "8080:8080"
+    networks:
+      - internal
+
+  # The official ESPHome dashboard/device builder, pointed at
+  # esphome-victron-ble/. This is what the app's Firmware tab embeds -
+  # it already handles editing victron-mppt.yaml/secrets.yaml (WiFi, API
+  # encryption key, OTA password, the SmartSolar's
+  # victron_mac_address/victron_bindkey), compiling, and OTA-flashing the
+  # ESP32, with live build logs in the browser. No custom build/flash code
+  # needed in this repo - see the README's "Firmware updates" section.
+  #
+  # Not published to the host directly - only firmware-proxy (below)
+  # talks to it, so its own port doesn't need publishing too.
+  esphome:
+    image: esphome/esphome:latest
+    restart: unless-stopped
+    environment:
+      # HTTP login for this dashboard - change these. Separate from the
+      # app's own API_TOKEN above.
+      ESPHOME_USERNAME: admin
+      ESPHOME_PASSWORD: changeme
+    volumes:
+      - ./esphome-victron-ble:/config
+    networks:
+      - internal
+
+  # Reverse proxy in front of `esphome` (see firmware-proxy/nginx.conf) -
+  # this is the actual address the app's Firmware tab iframe/link points
+  # at (ESPHOME_DASHBOARD_PORT above). Lets that iframe apply a matching
+  # dark theme to the dashboard without modifying the esphome/esphome
+  # image itself.
+  firmware-proxy:
+    build: ./firmware-proxy
+    restart: unless-stopped
+    depends_on:
+      - esphome
+    ports:
+      - "6052:80"
     networks:
       - internal
 

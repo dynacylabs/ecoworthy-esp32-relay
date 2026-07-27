@@ -99,6 +99,11 @@
   .status-msg.err { color: var(--red); }
   .kv-grid { display: grid; grid-template-columns: 200px 1fr; gap: 8px 12px; font-size: 13px; }
   .kv-grid div.k { color: var(--muted); }
+  .iframe-frame {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; height: 80vh; min-height: 480px;
+  }
+  .iframe-frame iframe { width: 100%; height: 100%; border: 0; display: block; }
   @media (max-width: 480px) {
     body { padding: 14px; }
     .kv-grid { grid-template-columns: 1fr; }
@@ -113,6 +118,7 @@
   <div class="tabs">
     <a href="/dashboard" class="tab" data-tab="dashboard">Dashboard</a>
     <a href="/settings" class="tab" data-tab="settings">Settings</a>
+    <a href="/firmware" class="tab" data-tab="firmware">Firmware</a>
   </div>
 
   <!-- ==================== Dashboard view ==================== -->
@@ -182,11 +188,54 @@
       </div>
     </div>
   </div>
+
+  <!-- ==================== Firmware view ==================== -->
+  <div id="view-firmware" class="view hidden">
+    <div class="banner">
+      Flashing new firmware, or changing the ESP32's WiFi/API/OTA
+      credentials or the Victron SmartSolar's MAC/bindkey, is done through
+      the official ESPHome dashboard below - not this page. It already
+      handles editing secrets, compiling, and OTA-installing safely.
+    </div>
+
+    <h2>ESPHome Dashboard</h2>
+    <div class="panel">
+      <p style="margin: 0 0 14px; font-size: 13px; color: var(--muted); line-height: 1.5;">
+        Runs as a separate container (the <code>esphome</code> service in
+        <code>docker-compose.yml</code>), pointed at
+        <code>esphome-victron-ble/</code>. Use it to edit
+        <code>victron-mppt.yaml</code>/<code>secrets.yaml</code> (WiFi, API
+        encryption key, OTA password, and the SmartSolar's
+        <code>victron_mac_address</code>/<code>victron_bindkey</code>),
+        then compile and OTA-install the result straight to the ESP32,
+        with live build logs in the browser. It has its own login,
+        separate from this dashboard's token. Embedded below (dark themed
+        to match this page - see <code>firmware-proxy/</code>), or
+        <a id="firmware-link" href="#" target="_blank" rel="noopener">open it in its own tab</a>.
+      </p>
+      <div class="iframe-frame">
+        <iframe id="firmware-frame" src="about:blank" title="ESPHome Dashboard"></iframe>
+      </div>
+      <div class="field-help" style="margin-top: 14px;">
+        First-ever flash of a blank ESP32 still needs a USB cable (it has
+        to be reachable on the network before OTA is possible) - see the
+        README's "ESPHome setup" section. Every flash after that,
+        including MAC/bindkey changes, can be done here over the air.
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
 const TOKEN = __API_TOKEN__;
 const TARGET_MAC = __TARGET_MAC__;
+let currentTab = "dashboard";
+let firmwareUrl = null;
+
+function loadFirmwareFrame() {
+  const frame = document.getElementById("firmware-frame");
+  if (firmwareUrl && frame.src !== firmwareUrl) frame.src = firmwareUrl;
+}
 
 function api(path, options = {}) {
   const sep = path.includes("?") ? "&" : "?";
@@ -199,11 +248,15 @@ function api(path, options = {}) {
 // history.pushState, rather than triggering a real navigation.
 
 function showTab(tab, { pushState = true } = {}) {
+  currentTab = tab;
   document.getElementById("view-dashboard").classList.toggle("hidden", tab !== "dashboard");
   document.getElementById("view-settings").classList.toggle("hidden", tab !== "settings");
+  document.getElementById("view-firmware").classList.toggle("hidden", tab !== "firmware");
   document.querySelectorAll(".tab").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
+  if (tab === "firmware") loadFirmwareFrame();
   if (pushState) {
-    history.pushState({ tab }, "", tab === "settings" ? "/settings" : "/dashboard");
+    const path = tab === "settings" ? "/settings" : tab === "firmware" ? "/firmware" : "/dashboard";
+    history.pushState({ tab }, "", path);
   }
 }
 
@@ -215,7 +268,7 @@ document.querySelectorAll(".tab").forEach(a => {
 });
 
 window.addEventListener("popstate", (e) => {
-  const tab = e.state?.tab || (location.pathname.includes("settings") ? "settings" : "dashboard");
+  const tab = e.state?.tab || (location.pathname.includes("settings") ? "settings" : location.pathname.includes("firmware") ? "firmware" : "dashboard");
   showTab(tab, { pushState: false });
 });
 
@@ -397,6 +450,10 @@ async function loadEnvironment() {
     <div class="k">ESPHome encryption key</div><div>${env.esphome_key_set ? "configured" : "not set"}</div>
     <div class="k">Dashboard API token</div><div>${env.api_token_set ? "configured" : "not set"}</div>
   `;
+  const port = env.esphome_dashboard_port || "6052";
+  firmwareUrl = `${location.protocol}//${location.hostname}:${port}/`;
+  document.getElementById("firmware-link").href = firmwareUrl;
+  if (currentTab === "firmware") loadFirmwareFrame();
 }
 
 function setStatus(message, ok) {
@@ -457,7 +514,7 @@ loadEnvironment();
 setInterval(refreshStatus, 15000);
 setInterval(refreshCharts, 30000);
 
-showTab(location.pathname.includes("settings") ? "settings" : "dashboard", { pushState: false });
+showTab(location.pathname.includes("settings") ? "settings" : location.pathname.includes("firmware") ? "firmware" : "dashboard", { pushState: false });
 </script>
 
 </body>

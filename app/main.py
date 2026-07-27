@@ -9,7 +9,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 import alerts
 import settings
 from ble_poller import BLEPoller
-from config import API_TOKEN, ESPHOME_API_ENCRYPTION_KEY, ESPHOME_HOST, ESPHOME_PORT
+from config import (
+    API_TOKEN,
+    ESPHOME_API_ENCRYPTION_KEY,
+    ESPHOME_DASHBOARD_PORT,
+    ESPHOME_HOST,
+    ESPHOME_PORT,
+)
 from db import close_pool, get_pool
 from migrate import run as run_migrations
 from models import DeviceStatus, ReadingPoint
@@ -136,6 +142,7 @@ async def get_environment():
         "esphome_port": ESPHOME_PORT,
         "esphome_key_set": bool(ESPHOME_API_ENCRYPTION_KEY),
         "api_token_set": bool(API_TOKEN),
+        "esphome_dashboard_port": ESPHOME_DASHBOARD_PORT,
     }
 
 
@@ -168,6 +175,11 @@ async def dashboard_page():
 
 @app.get("/settings")
 async def settings_page():
+    return _render_app_page()
+
+
+@app.get("/firmware")
+async def firmware_page():
     return _render_app_page()
 
 
