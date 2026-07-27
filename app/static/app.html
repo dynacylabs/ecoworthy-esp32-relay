@@ -99,11 +99,15 @@
   .status-msg.err { color: var(--red); }
   .kv-grid { display: grid; grid-template-columns: 200px 1fr; gap: 8px 12px; font-size: 13px; }
   .kv-grid div.k { color: var(--muted); }
-  .iframe-frame {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; height: 80vh; min-height: 480px;
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.success { color: var(--green); border-color: var(--green); }
+  .badge.error { color: var(--red); border-color: var(--red); }
+  .log-panel {
+    background: #010409; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; height: 320px; overflow-y: auto; margin-top: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-all; color: var(--text);
   }
-  .iframe-frame iframe { width: 100%; height: 100%; border: 0; display: block; }
   @media (max-width: 480px) {
     body { padding: 14px; }
     .kv-grid { grid-template-columns: 1fr; }
@@ -192,36 +196,36 @@
   <!-- ==================== Firmware view ==================== -->
   <div id="view-firmware" class="view hidden">
     <div class="banner">
-      Flashing new firmware, or changing the ESP32's WiFi/API/OTA
-      credentials or the Victron SmartSolar's MAC/bindkey, is done through
-      the official ESPHome dashboard below - not this page. It already
-      handles editing secrets, compiling, and OTA-installing safely.
+      Edits <code>esphome-victron-ble/secrets.yaml</code> directly, then
+      compiles and OTA-installs <code>victron-mppt.yaml</code> to the
+      ESP32 using the <code>esphome</code> CLI, right from this container -
+      no separate dashboard container needed. The very first build still
+      has to download the ESP-IDF/PlatformIO toolchain (~1GB, one-time,
+      needs internet access) - it's cached afterwards, so every build
+      after that is much faster.
     </div>
 
-    <h2>ESPHome Dashboard</h2>
+    <h2>Device credentials</h2>
+    <div class="panel" id="firmware-fields"></div>
+    <div class="actions">
+      <button id="fw-save-btn">Save credentials</button>
+      <span class="status-msg" id="firmware-status-msg"></span>
+    </div>
+
+    <h2>Compile &amp; upload</h2>
     <div class="panel">
-      <p style="margin: 0 0 14px; font-size: 13px; color: var(--muted); line-height: 1.5;">
-        Runs as a separate container (the <code>esphome</code> service in
-        <code>docker-compose.yml</code>), pointed at
-        <code>esphome-victron-ble/</code>. Use it to edit
-        <code>victron-mppt.yaml</code>/<code>secrets.yaml</code> (WiFi, API
-        encryption key, OTA password, and the SmartSolar's
-        <code>victron_mac_address</code>/<code>victron_bindkey</code>),
-        then compile and OTA-install the result straight to the ESP32,
-        with live build logs in the browser. It has its own login,
-        separate from this dashboard's token. Embedded below (dark themed
-        to match this page - see <code>firmware-proxy/</code>), or
-        <a id="firmware-link" href="#" target="_blank" rel="noopener">open it in its own tab</a>.
-      </p>
-      <div class="iframe-frame">
-        <iframe id="firmware-frame" src="about:blank" title="ESPHome Dashboard"></iframe>
+      <div class="actions" style="margin-top: 0;">
+        <button id="build-btn">Compile &amp; upload</button>
+        <span class="badge" id="build-badge">idle</span>
       </div>
-      <div class="field-help" style="margin-top: 14px;">
-        First-ever flash of a blank ESP32 still needs a USB cable (it has
-        to be reachable on the network before OTA is possible) - see the
-        README's "ESPHome setup" section. Every flash after that,
-        including MAC/bindkey changes, can be done here over the air.
+      <div class="field-help" style="margin: 10px 0;">
+        Uploads over the air to <code>ESPHOME_HOST</code>
+        (<code>docker-compose.yml</code>) - the ESP32 must already be
+        running ESPHome and reachable on the network. A blank/new ESP32
+        needs one initial flash over USB first - see the README's
+        "ESPHome setup" section.
       </div>
+      <pre class="log-panel" id="build-log"></pre>
     </div>
   </div>
 </div>
@@ -230,12 +234,6 @@
 const TOKEN = __API_TOKEN__;
 const TARGET_MAC = __TARGET_MAC__;
 let currentTab = "dashboard";
-let firmwareUrl = null;
-
-function loadFirmwareFrame() {
-  const frame = document.getElementById("firmware-frame");
-  if (firmwareUrl && frame.src !== firmwareUrl) frame.src = firmwareUrl;
-}
 
 function api(path, options = {}) {
   const sep = path.includes("?") ? "&" : "?";
@@ -253,7 +251,6 @@ function showTab(tab, { pushState = true } = {}) {
   document.getElementById("view-settings").classList.toggle("hidden", tab !== "settings");
   document.getElementById("view-firmware").classList.toggle("hidden", tab !== "firmware");
   document.querySelectorAll(".tab").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
-  if (tab === "firmware") loadFirmwareFrame();
   if (pushState) {
     const path = tab === "settings" ? "/settings" : tab === "firmware" ? "/firmware" : "/dashboard";
     history.pushState({ tab }, "", path);
@@ -364,6 +361,13 @@ function initCharts() {
 }
 
 async function refreshCharts() {
+  // Skip the actual Chart.js update work when the dashboard tab isn't
+  // visible - its canvases sit inside a display:none container while
+  // another tab is active, and Chart.js's responsive-resize/
+  // ResizeObserver code can throw when asked to measure a hidden
+  // element (harmless on its own, but avoidable).
+  if (currentTab !== "dashboard") return;
+
   const resp = await api(`/api/readings/${encodeURIComponent(TARGET_MAC)}?hours=${selectedHours}`);
   const series = resp.ok ? await resp.json() : [];
 
@@ -391,8 +395,8 @@ async function refreshCharts() {
 }
 
 function refreshDashboard() {
-  refreshStatus();
-  refreshCharts();
+  refreshStatus().catch(err => console.error("refreshStatus failed", err));
+  refreshCharts().catch(err => console.error("refreshCharts failed", err));
 }
 
 // ==================== Settings view logic ====================
@@ -450,10 +454,6 @@ async function loadEnvironment() {
     <div class="k">ESPHome encryption key</div><div>${env.esphome_key_set ? "configured" : "not set"}</div>
     <div class="k">Dashboard API token</div><div>${env.api_token_set ? "configured" : "not set"}</div>
   `;
-  const port = env.esphome_dashboard_port || "6052";
-  firmwareUrl = `${location.protocol}//${location.hostname}:${port}/`;
-  document.getElementById("firmware-link").href = firmwareUrl;
-  if (currentTab === "firmware") loadFirmwareFrame();
 }
 
 function setStatus(message, ok) {
@@ -505,16 +505,137 @@ async function sendTestNotification() {
 document.getElementById("save-btn").addEventListener("click", saveSettings);
 document.getElementById("test-btn").addEventListener("click", sendTestNotification);
 
+// ==================== Firmware view logic ====================
+
+let firmwareFields = [];
+let firmwareStream = null;
+
+function renderFirmwareFields(fields) {
+  document.getElementById("firmware-fields").innerHTML = fields.map(f => `
+    <div class="field">
+      <div class="field-head">
+        <span class="field-label">${f.label}</span>
+      </div>
+      ${f.help ? `<div class="field-help">${f.help}</div>` : ""}
+      <input
+        type="${f.secret ? "password" : "text"}"
+        id="fw-field-${f.key}"
+        data-key="${f.key}"
+        value="${f.value || ""}"
+        autocomplete="off"
+      />
+    </div>
+  `).join("");
+}
+
+async function loadFirmwareSecrets() {
+  const resp = await api("/api/firmware/secrets");
+  if (!resp.ok) return;
+  firmwareFields = await resp.json();
+  renderFirmwareFields(firmwareFields);
+}
+
+function setFirmwareStatus(message, ok) {
+  const el = document.getElementById("firmware-status-msg");
+  el.textContent = message;
+  el.className = `status-msg ${ok ? "ok" : "err"}`;
+  if (message && ok) setTimeout(() => { el.textContent = ""; }, 4000);
+}
+
+async function saveFirmwareSecrets() {
+  const updates = {};
+  for (const f of firmwareFields) {
+    const input = document.getElementById(`fw-field-${f.key}`);
+    if (!input) continue;
+    updates[f.key] = input.value;
+  }
+  const resp = await api("/api/firmware/secrets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (resp.ok) {
+    firmwareFields = await resp.json();
+    renderFirmwareFields(firmwareFields);
+    setFirmwareStatus("Saved.", true);
+  } else {
+    const body = await resp.json().catch(() => ({}));
+    setFirmwareStatus(body.detail || "Failed to save.", false);
+  }
+}
+
+function appendBuildLog(line) {
+  const pre = document.getElementById("build-log");
+  pre.textContent += (pre.textContent ? "\n" : "") + line;
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function setBuildBadge(status) {
+  const badge = document.getElementById("build-badge");
+  badge.textContent = status;
+  badge.className = `badge ${status}`;
+}
+
+function streamFirmwareLog() {
+  if (firmwareStream) firmwareStream.close();
+  firmwareStream = new EventSource(`/api/firmware/stream?token=${encodeURIComponent(TOKEN)}`);
+  firmwareStream.onmessage = (e) => appendBuildLog(e.data);
+  firmwareStream.addEventListener("done", (e) => {
+    setBuildBadge(e.data);
+    document.getElementById("build-btn").disabled = false;
+    firmwareStream.close();
+    firmwareStream = null;
+  });
+  firmwareStream.onerror = () => {
+    // Connection dropped (e.g. server restarted) - stop retrying, a fresh
+    // page load will pick the job status back up via resumeFirmwareStatus().
+    if (firmwareStream) { firmwareStream.close(); firmwareStream = null; }
+  };
+}
+
+async function startFirmwareBuild() {
+  document.getElementById("build-log").textContent = "";
+  const btn = document.getElementById("build-btn");
+  btn.disabled = true;
+  setBuildBadge("running");
+  const resp = await api("/api/firmware/build", { method: "POST" });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    setFirmwareStatus(body.detail || "Failed to start build.", false);
+    btn.disabled = false;
+    setBuildBadge("idle");
+    return;
+  }
+  streamFirmwareLog();
+}
+
+async function resumeFirmwareStatus() {
+  const resp = await api("/api/firmware/status");
+  if (!resp.ok) return;
+  const { status, running } = await resp.json();
+  setBuildBadge(status);
+  document.getElementById("build-btn").disabled = running;
+  if (running) streamFirmwareLog();
+}
+
+document.getElementById("fw-save-btn").addEventListener("click", saveFirmwareSecrets);
+document.getElementById("build-btn").addEventListener("click", startFirmwareBuild);
+
 // ==================== Boot ====================
+
+// Set the active tab first so everything below (chart visibility,
+// refreshCharts()'s guard, etc.) sees the correct state from the start,
+// instead of switching tabs *after* kicking off the initial data loads.
+showTab(location.pathname.includes("settings") ? "settings" : location.pathname.includes("firmware") ? "firmware" : "dashboard", { pushState: false });
 
 initCharts();
 refreshDashboard();
-loadSettings();
-loadEnvironment();
+loadSettings().catch(err => console.error("loadSettings failed", err));
+loadEnvironment().catch(err => console.error("loadEnvironment failed", err));
+loadFirmwareSecrets().catch(err => console.error("loadFirmwareSecrets failed", err));
+resumeFirmwareStatus().catch(err => console.error("resumeFirmwareStatus failed", err));
 setInterval(refreshStatus, 15000);
 setInterval(refreshCharts, 30000);
-
-showTab(location.pathname.includes("settings") ? "settings" : location.pathname.includes("firmware") ? "firmware" : "dashboard", { pushState: false });
 </script>
 
 </body>

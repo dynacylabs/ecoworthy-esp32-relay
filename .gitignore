@@ -1,7 +1,5 @@
 esphome-victron-ble/secrets.yaml
 esphome-victron-ble/.esphome/
-esphome-victron-ble/.git/
-esphome-victron-ble/.device-builder*
 .env
 docker-compose.override.yml
 __pycache__/

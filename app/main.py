@@ -4,15 +4,15 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 
 import alerts
+import firmware
 import settings
 from ble_poller import BLEPoller
 from config import (
     API_TOKEN,
     ESPHOME_API_ENCRYPTION_KEY,
-    ESPHOME_DASHBOARD_PORT,
     ESPHOME_HOST,
     ESPHOME_PORT,
 )
@@ -142,8 +142,51 @@ async def get_environment():
         "esphome_port": ESPHOME_PORT,
         "esphome_key_set": bool(ESPHOME_API_ENCRYPTION_KEY),
         "api_token_set": bool(API_TOKEN),
-        "esphome_dashboard_port": ESPHOME_DASHBOARD_PORT,
     }
+
+
+@app.get("/api/firmware/secrets", dependencies=[Depends(require_token)])
+async def get_firmware_secrets():
+    return firmware.describe_secrets()
+
+
+@app.post("/api/firmware/secrets", dependencies=[Depends(require_token)])
+async def update_firmware_secrets(updates: dict[str, str]):
+    return firmware.save_secrets(updates)
+
+
+@app.post("/api/firmware/build", dependencies=[Depends(require_token)])
+async def start_firmware_build():
+    try:
+        firmware.job.start(ESPHOME_HOST)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return {"status": "started"}
+
+
+@app.get("/api/firmware/status", dependencies=[Depends(require_token)])
+async def get_firmware_status():
+    return {"status": firmware.job.status, "running": firmware.job.running}
+
+
+@app.get("/api/firmware/stream", dependencies=[Depends(require_token)])
+async def firmware_stream():
+    # Server-Sent Events: buffered + live `esphome compile`/`upload`
+    # output for the Firmware tab's log panel (see firmware.BuildJob).
+    # Reconnecting mid-build replays everything seen so far.
+    async def gen():
+        q = firmware.job.subscribe()
+        try:
+            while True:
+                line = await q.get()
+                if line is None:
+                    yield f"event: done\ndata: {firmware.job.status}\n\n"
+                    break
+                yield f"data: {line}\n\n"
+        finally:
+            firmware.job.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/")

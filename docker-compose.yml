@@ -34,7 +34,7 @@ services:
       TARGET_BLE_MAC: "aa:bb:cc:dd:ee:ff"
       # Everything below (ntfy + alert thresholds + stall timing) is also
       # editable at runtime from the dashboard's Settings tab
-      # (http://<host>:8080/settings) - these are just the defaults used
+      # (http://<host>:8081/settings) - these are just the defaults used
       # until something's overridden there. See app/settings.py.
       #
       # ntfy.sh push notifications for alert conditions (low voltage,
@@ -51,56 +51,26 @@ services:
       # threshold needed for that one.
       ALERT_LOW_VOLTAGE_V: ""
       ALERT_COOLDOWN_SECONDS: "1800"
-      # Port the ESPHome dashboard (below) is published on. Only used to
-      # build the "Open ESPHome Dashboard" link on this app's Firmware tab -
-      # change it if you remap that service's port below.
-      ESPHOME_DASHBOARD_PORT: "6052"
+      # Where the esphome CLI (invoked by the Firmware tab - see
+      # app/firmware.py) caches downloaded PlatformIO/ESP-IDF toolchains,
+      # so the ~1GB one-time download only happens once instead of on
+      # every container recreate. Backed by the firmware-cache volume
+      # below.
+      PLATFORMIO_CORE_DIR: /cache/platformio
+      ESPHOME_ESP_IDF_PREFIX: /cache/esp-idf
     volumes:
       # Read-only access to the migration files so app/migrate.py can
       # apply any not-yet-applied one on startup (see its module
       # docstring) - keeps upgrades to a container restart, no manual
       # `psql` step needed.
       - ./db/migrations:/app/db/migrations:ro
+      # Read-write: the Firmware tab edits secrets.yaml and runs
+      # `esphome compile`/`upload` against victron-mppt.yaml here (see
+      # app/firmware.py).
+      - ./esphome-victron-ble:/app/esphome-victron-ble
+      - firmware-cache:/cache
     ports:
-      - "8080:8080"
-    networks:
-      - internal
-
-  # The official ESPHome dashboard/device builder, pointed at
-  # esphome-victron-ble/. This is what the app's Firmware tab embeds -
-  # it already handles editing victron-mppt.yaml/secrets.yaml (WiFi, API
-  # encryption key, OTA password, the SmartSolar's
-  # victron_mac_address/victron_bindkey), compiling, and OTA-flashing the
-  # ESP32, with live build logs in the browser. No custom build/flash code
-  # needed in this repo - see the README's "Firmware updates" section.
-  #
-  # Not published to the host directly - only firmware-proxy (below)
-  # talks to it, so its own port doesn't need publishing too.
-  esphome:
-    image: esphome/esphome:latest
-    restart: unless-stopped
-    environment:
-      # HTTP login for this dashboard - change these. Separate from the
-      # app's own API_TOKEN above.
-      ESPHOME_USERNAME: admin
-      ESPHOME_PASSWORD: changeme
-    volumes:
-      - ./esphome-victron-ble:/config
-    networks:
-      - internal
-
-  # Reverse proxy in front of `esphome` (see firmware-proxy/nginx.conf) -
-  # this is the actual address the app's Firmware tab iframe/link points
-  # at (ESPHOME_DASHBOARD_PORT above). Lets that iframe apply a matching
-  # dark theme to the dashboard without modifying the esphome/esphome
-  # image itself.
-  firmware-proxy:
-    build: ./firmware-proxy
-    restart: unless-stopped
-    depends_on:
-      - esphome
-    ports:
-      - "6052:80"
+      - "8081:8080"
     networks:
       - internal
 
@@ -109,3 +79,4 @@ networks:
 
 volumes:
   db-data:
+  firmware-cache:
