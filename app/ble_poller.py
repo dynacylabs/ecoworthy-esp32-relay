@@ -151,19 +151,31 @@ class BLEPoller:
         reading = {field: self._latest.get(field) for field in ALL_FIELDS}
         try:
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO readings (
-                        time, device_id, battery_voltage_v, battery_current_a,
-                        pv_power_w, yield_today_kwh, load_current_a,
-                        device_state, charger_error
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    """,
-                    now, device_id,
-                    reading["battery_voltage_v"], reading["battery_current_a"],
-                    reading["pv_power_w"], reading["yield_today_kwh"], reading["load_current_a"],
-                    reading["device_state"], reading["charger_error"],
-                )
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO readings (
+                            time, device_id, battery_voltage_v, battery_current_a,
+                            pv_power_w, yield_today_kwh, load_current_a,
+                            device_state, charger_error
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        """,
+                        now, device_id,
+                        reading["battery_voltage_v"], reading["battery_current_a"],
+                        reading["pv_power_w"], reading["yield_today_kwh"], reading["load_current_a"],
+                        reading["device_state"], reading["charger_error"],
+                    )
+                    # Touched on every reading, not just when the connection
+                    # is (re)opened - unlike heltec-wifi-optimization's
+                    # short-lived per-poll SSH connections, this app holds
+                    # one ESPHome API connection open for as long as it
+                    # stays healthy (hours/days), so get_or_create_device()
+                    # alone left last_seen - and therefore the dashboard's
+                    # online/offline dot, which uses the same
+                    # now()-last_seen<120s threshold as heltec - going
+                    # stale despite readings still arriving every few
+                    # seconds.
+                    await conn.execute("UPDATE devices SET last_seen = $2 WHERE id = $1", device_id, now)
         except Exception:
             logger.exception("Failed to store reading")
             return
