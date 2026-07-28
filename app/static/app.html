@@ -531,7 +531,18 @@ let firmwareFields = [];
 let firmwareStream = null;
 
 function renderFirmwareFields(fields) {
-  document.getElementById("firmware-fields").innerHTML = fields.map(f => `
+  document.getElementById("firmware-fields").innerHTML = fields.map(f => {
+    // Secret fields (wifi_password, api_encryption_key, ota_password,
+    // victron_bindkey) never get their actual value sent from the server
+    // (see firmware.describe_secrets()) - same masking pattern as the
+    // Settings tab's ntfy_auth_token. Leaving it blank on save keeps
+    // whatever's already stored in secrets.yaml.
+    const value = f.secret ? "" : (f.value || "");
+    const placeholder = f.secret ? "leave blank to keep unchanged" : "";
+    const note = f.secret
+      ? (f.is_set ? "A value is currently set." : "No value currently set.")
+      : "";
+    return `
     <div class="field">
       <div class="field-head">
         <span class="field-label">${f.label}</span>
@@ -541,11 +552,14 @@ function renderFirmwareFields(fields) {
         type="${f.secret ? "password" : "text"}"
         id="fw-field-${f.key}"
         data-key="${f.key}"
-        value="${f.value || ""}"
-        autocomplete="off"
+        placeholder="${placeholder}"
+        value="${value}"
+        autocomplete="${f.secret ? "new-password" : "off"}"
       />
+      ${note ? `<div class="field-help">${note}</div>` : ""}
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 
 async function loadFirmwareSecrets() {
@@ -567,6 +581,12 @@ async function saveFirmwareSecrets() {
   for (const f of firmwareFields) {
     const input = document.getElementById(`fw-field-${f.key}`);
     if (!input) continue;
+    // A blank secret field means "leave unchanged" - it never had its
+    // real value loaded in, so blank doesn't tell us the user wants it
+    // cleared (see renderFirmwareFields()). Skip it rather than
+    // submitting an empty string that would wipe out secrets.yaml's
+    // stored value.
+    if (f.secret && input.value === "") continue;
     updates[f.key] = input.value;
   }
   const resp = await api("/api/firmware/secrets", {

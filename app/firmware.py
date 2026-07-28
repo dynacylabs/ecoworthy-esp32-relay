@@ -86,6 +86,13 @@ def load_secrets() -> dict:
 
 
 def describe_secrets() -> list[dict]:
+    # Secret fields (wifi_password, api_encryption_key, ota_password,
+    # victron_bindkey) never round-trip their actual value to the browser
+    # - only whether one is currently stored in secrets.yaml - same
+    # reasoning/pattern as settings.describe()'s handling of
+    # ntfy_auth_token. Saving with a blank secret field leaves the
+    # stored value untouched (see save_secrets(); the frontend omits
+    # blank secret keys from the update payload entirely).
     current = load_secrets()
     return [
         {
@@ -93,7 +100,8 @@ def describe_secrets() -> list[dict]:
             "label": f.label,
             "help": f.help,
             "secret": f.secret,
-            "value": current.get(f.key, ""),
+            "value": None if f.secret else current.get(f.key, ""),
+            "is_set": bool(current.get(f.key)),
         }
         for f in SCHEMA
     ]
