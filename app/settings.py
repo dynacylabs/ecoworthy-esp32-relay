@@ -48,6 +48,13 @@ SCHEMA: list[Field] = [
         "Fire the offline alert if no sensor update has arrived from the ESP32 in this long.", "device",
     ),
     Field(
+        "telemetry_retention_days", float, config.TELEMETRY_RETENTION_DAYS,
+        "Telemetry retention (days)",
+        "How long to keep readings history. 0 = keep forever - matches "
+        "heltec-wifi-optimization's telemetry_retention_days default/semantics.",
+        "device",
+    ),
+    Field(
         "ntfy_url", str, config.NTFY_URL,
         "ntfy server URL", "Use https://ntfy.sh, or your own self-hosted instance.", "alerts",
     ),
@@ -127,7 +134,11 @@ async def save(pool, updates: dict) -> dict:
 
 async def describe(pool) -> list[dict]:
     """Schema metadata + current effective value + override status, for
-    the Settings page."""
+    the Settings page. Secret fields (ntfy_auth_token) never round-trip
+    their actual value to the browser - only whether one is currently
+    set (is_override doubles as that, same as
+    heltec-wifi-optimization's ntfy_token_set) - so `value`/`env_default`
+    are masked to None for those."""
     rows = await pool.fetch("SELECT key FROM settings")
     overridden = {r["key"] for r in rows}
     return [
@@ -138,8 +149,8 @@ async def describe(pool) -> list[dict]:
             "group": field.group,
             "type": "float" if field.value_type is float else "str",
             "secret": field.secret,
-            "value": _cache.get(field.key, field.env_default),
-            "env_default": field.env_default,
+            "value": None if field.secret else _cache.get(field.key, field.env_default),
+            "env_default": None if field.secret else field.env_default,
             "is_override": field.key in overridden,
         }
         for field in SCHEMA

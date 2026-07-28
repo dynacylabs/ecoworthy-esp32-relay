@@ -16,7 +16,7 @@ from config import (
     ESPHOME_HOST,
     ESPHOME_PORT,
 )
-from db import close_pool, get_pool
+from db import close_pool, ensure_retention_policy, get_pool
 from migrate import run as run_migrations
 from models import DeviceStatus, ReadingPoint
 
@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):
     pool = await get_pool()
     await run_migrations(pool)
     await settings.load(pool)
+    await ensure_retention_policy(pool, settings.current()["telemetry_retention_days"])
     poller_task = asyncio.create_task(poller.run_forever())
     yield
     await poller.stop()
@@ -121,6 +122,11 @@ async def update_settings(updates: dict[str, str | float | None]):
         await settings.save(pool, updates)
     except ValueError as exc:
         raise HTTPException(400, f"invalid setting value: {exc}")
+    # Re-applied immediately (not just at startup) so a changed
+    # telemetry_retention_days takes effect without a container restart -
+    # same reasoning as ble_poller.py reading target_ble_mac/
+    # ble_stall_seconds fresh on every reconnect.
+    await ensure_retention_policy(pool, settings.current()["telemetry_retention_days"])
     return await settings.describe(pool)
 
 

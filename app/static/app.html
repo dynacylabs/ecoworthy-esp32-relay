@@ -411,10 +411,24 @@ function renderGroup(containerId, groupFields) {
   const container = document.getElementById(containerId);
   container.innerHTML = groupFields.map(f => {
     const inputType = f.secret ? "password" : (f.type === "float" ? "number" : "text");
-    const placeholder = (f.env_default === null || f.env_default === undefined || f.env_default === "")
-      ? "(none - blank disables this check)"
-      : `${f.env_default}`;
-    const currentValue = f.is_override ? f.value : "";
+    // Secret fields (ntfy_auth_token) never get their actual value sent
+    // from the server (see settings.describe()) - the input always
+    // starts blank, with a note on whether one's currently stored.
+    // Leaving it blank on save keeps whatever's already set, same
+    // pattern as heltec-wifi-optimization's ntfy_token. Everything else
+    // prepopulates with its current *effective* value (override or env
+    // default), not just when overridden - a blank field used to mean
+    // "using the default, but you can't tell what that is without
+    // checking the placeholder."
+    const placeholder = f.secret
+      ? "leave blank to keep unchanged"
+      : (f.env_default === null || f.env_default === undefined || f.env_default === "")
+        ? "(none - blank disables this check)"
+        : `${f.env_default}`;
+    const currentValue = f.secret ? "" : (f.value === null || f.value === undefined ? "" : f.value);
+    const note = f.secret
+      ? (f.is_override ? "A value is currently set." : "No value currently set.")
+      : "";
     return `
       <div class="field">
         <div class="field-head">
@@ -428,9 +442,10 @@ function renderGroup(containerId, groupFields) {
           data-key="${f.key}"
           ${f.type === "float" ? 'step="any"' : ""}
           placeholder="${placeholder}"
-          value="${currentValue === null || currentValue === undefined ? "" : currentValue}"
-          autocomplete="off"
+          value="${currentValue}"
+          autocomplete="${f.secret ? "new-password" : "off"}"
         />
+        ${note ? `<div class="field-help">${note}</div>` : ""}
       </div>
     `;
   }).join("");
@@ -468,6 +483,11 @@ async function saveSettings() {
   for (const f of settingsFields) {
     const input = document.getElementById(fieldInputId(f.key));
     if (!input) continue;
+    // A blank secret field means "leave unchanged", not "clear it" - it
+    // never had its real value loaded in, so blank doesn't tell us
+    // anything (see renderGroup()). Skip it entirely rather than
+    // submitting an empty string that would wipe out the stored value.
+    if (f.secret && input.value === "") continue;
     updates[f.key] = input.value;
   }
   const resp = await api("/api/settings", {

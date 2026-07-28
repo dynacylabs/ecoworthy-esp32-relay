@@ -174,10 +174,27 @@ The **Settings** tab (`/settings`) exposes every runtime-tunable option
 as a web form - changes are saved to the database and take effect on the
 next reading/reconnect, no restart required:
 
-- **Device** - the target MAC (label) and the stall timeout (how long
+- **Device** - the target MAC (label), the stall timeout (how long
   without a sensor update before the device is considered offline - see
-  `app/ble_poller.py`).
+  `app/ble_poller.py`), and telemetry retention.
 - **Alerts (ntfy)** - everything described below.
+
+### Telemetry retention
+
+`telemetry_retention_days` (default **0 = keep forever**, editable from
+the Settings tab's Device group) is applied as a TimescaleDB retention
+policy on the `readings` hypertable both at startup and immediately
+whenever it's changed (`app/db.py`'s `ensure_retention_policy`) - no
+restart needed. Matches heltec-wifi-optimization's
+`telemetry_retention_days` default/semantics. Setting it to a positive
+number uses `if_not_exists => true`, so it's safe to save repeatedly -
+but that also means changing a *nonzero* value on a deployment that
+already has the policy won't take effect on its own; remove the old one
+by hand first:
+`docker compose exec timescaledb psql -U victron -d victron -c "SELECT remove_retention_policy('readings');"`
+then save the new value from the Settings tab again. Setting it *back to
+0*, though, is handled automatically - the app removes any existing
+policy whenever the value is 0.
 
 Each field falls back to its `docker-compose.yml` env var as a default
 (shown as the input's placeholder) until you save an override; clearing a

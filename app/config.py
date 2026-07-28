@@ -28,6 +28,12 @@ TARGET_BLE_MAC = os.environ["TARGET_BLE_MAC"]
 # and fire the offline alert rather than waiting forever.
 BLE_STALL_SECONDS = float(os.environ.get("BLE_STALL_SECONDS", "60"))
 
+# How long to keep rows in `readings` before TimescaleDB drops them, via
+# add_retention_policy() (see db.ensure_retention_policies). 0 = keep
+# forever - same default/semantics as heltec-wifi-optimization's
+# telemetry_retention_days, which this is meant to match.
+TELEMETRY_RETENTION_DAYS = float(os.environ.get("TELEMETRY_RETENTION_DAYS", "0"))
+
 # --- ntfy.sh push notifications (see app/alerts.py) --------------------
 #
 # Alerting is disabled entirely unless NTFY_TOPIC is set. Point NTFY_URL

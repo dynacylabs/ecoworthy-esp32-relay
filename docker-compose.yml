@@ -51,6 +51,10 @@ services:
       # threshold needed for that one.
       ALERT_LOW_VOLTAGE_V: ""
       ALERT_COOLDOWN_SECONDS: "1800"
+      # How long to keep readings history before TimescaleDB drops it.
+      # 0 = keep forever - matches heltec-wifi-optimization's
+      # telemetry_retention_days default/semantics.
+      TELEMETRY_RETENTION_DAYS: "0"
       # Where the esphome CLI (invoked by the Firmware tab - see
       # app/firmware.py) caches downloaded PlatformIO/ESP-IDF toolchains,
       # so the ~1GB one-time download only happens once instead of on
