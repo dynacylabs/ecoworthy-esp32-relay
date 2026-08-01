@@ -312,7 +312,7 @@ async function refreshStatus() {
         <div class="k">Battery</div><div class="v">${fmt(r.battery_voltage_v, " V")} / ${fmt(r.battery_current_a, " A")}</div>
         <div class="k">PV power</div><div class="v">${fmt(r.pv_power_w, " W", 0)}</div>
         <div class="k">Yield today</div><div class="v">${fmt(r.yield_today_kwh, " kWh")}</div>
-        <div class="k">Load current</div><div class="v">${fmt(r.load_current_a, " A")}</div>
+        <div class="k">Load current</div><div class="v">${fmt(r.load_current_a == null ? null : Math.abs(r.load_current_a), " A")}</div>
         <div class="k">State</div><div class="v">${r.device_state ?? "—"}</div>
         <div class="k">Charger error</div><div class="v">${r.charger_error ?? "—"}</div>
       </div>
@@ -370,6 +370,21 @@ function setChartWindow(chart, hours) {
   const now = Date.now();
   chart.options.scales.x.min = now - hours * 3600 * 1000;
   chart.options.scales.x.max = now;
+
+  // Beyond a day, "10AM" alone is ambiguous - it could be any of the
+  // days in the window. Add the date to every tick so it's obvious
+  // which day a given part of the chart belongs to.
+  if (hours > 24) {
+    chart.options.scales.x.ticks.callback = function (value) {
+      const d = new Date(value);
+      return [
+        d.toLocaleDateString([], { month: "short", day: "numeric" }),
+        d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+      ];
+    };
+  } else {
+    delete chart.options.scales.x.ticks.callback;
+  }
 }
 
 async function refreshCharts() {
@@ -403,7 +418,7 @@ async function refreshCharts() {
 
   charts.load.data.datasets = [
     { label: "Load Current (A)", borderColor: "#3fb950", backgroundColor: "#3fb950", pointRadius: 0, borderWidth: 2,
-      data: series.map(p => ({ x: p.time, y: p.load_current_a })) },
+      data: series.map(p => ({ x: p.time, y: p.load_current_a == null ? null : Math.abs(p.load_current_a) })) },
   ];
   setChartWindow(charts.load, selectedHours);
   charts.load.update();
