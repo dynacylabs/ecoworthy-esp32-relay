@@ -186,6 +186,14 @@ class BuildJob:
             cwd=ESPHOME_DIR,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Default StreamReader limit is 64KiB - confirmed live
+            # (2026-08-03): ninja's build output can emit a single line
+            # past that (no embedded newline for a long stretch), which
+            # raises LimitOverrunError and kills the whole build with no
+            # indication it was a buffering issue rather than a real
+            # compile failure. 8MiB is comfortably above anything a
+            # compiler/ninja/esphome line should ever produce.
+            limit=8 * 1024 * 1024,
         )
         assert proc.stdout is not None
         async for raw in proc.stdout:
