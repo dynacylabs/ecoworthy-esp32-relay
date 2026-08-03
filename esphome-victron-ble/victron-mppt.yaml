@@ -106,3 +106,15 @@ text_sensor:
     victron_ble_id: smartsolar
     name: "Charger Error"
     type: CHARGER_ERROR
+
+# Confirmed live (2026-08-03 incident): the native API has no generic
+# remote-reboot RPC - restarting requires an entity like this one
+# (client.button_command against it, or a physical power-cycle). Added
+# after a BLE-tracker hang (WiFi/API stayed fully responsive, but zero BLE
+# advertisements of any kind - not just the Victron unit's - were being
+# received) that only a reboot could clear. Keep this in place going
+# forward so that class of failure never again requires a full OTA
+# re-flash just to force a restart.
+button:
+  - platform: restart
+    name: "Restart"
